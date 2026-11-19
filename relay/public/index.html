@@ -87,6 +87,7 @@ const openFileDevices = new Set();
 const fileListCache = new Map();
 const selectedFilePaths = new Map();
 let transferDisplayLimit = 100;
+const openFolderPathsByDevice = new Map();
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -290,6 +291,9 @@ function renderFiles(id, el, j) {
   fileListCache.set(id, j);
   let wrap = el.querySelector('.files-wrap');
   if (!wrap) { wrap = document.createElement('div'); wrap.className = 'files-wrap'; el.append(wrap); }
+  // وضعیت پوشه‌های باز و موقعیت اسکرول را هنگام بازسازی فهرست حفظ کن.
+  const previousOpenFolders = openFolderPathsByDevice.get(id) || new Set();
+  const previousScrollTop = wrap.scrollTop;
   wrap.replaceChildren();
 
   const allFiles = (Array.isArray(j.files) ? j.files : []).map(f => {
@@ -384,7 +388,7 @@ function renderFiles(id, el, j) {
 
   // ساخت تدریجی درخت: زیرپوشه‌ها فقط هنگام باز شدن ساخته می‌شوند
   // و در هر پوشه حداکثر ۱۰۰ مورد در هر مرحله به DOM اضافه می‌شود.
-  function renderTree(container, nodes, depth = 0) {
+  function renderTree(container, nodes, depth = 0, parentPath = '') {
     const entries = [...nodes.entries()].sort((a, b) => {
       const aFolder = a[1] instanceof Map, bFolder = b[1] instanceof Map;
       if (aFolder !== bFolder) return aFolder ? -1 : 1;
@@ -398,17 +402,27 @@ function renderFiles(id, el, j) {
         if (value instanceof Map) {
           const details = document.createElement('details');
           details.className = 'phone-folder';
+          const folderKey = parentPath ? parentPath + '/' + name : name;
+          details.dataset.folderKey = folderKey;
+          details.open = previousOpenFolders.has(folderKey);
           const summary = document.createElement('summary');
           summary.textContent = '📁 ' + name;
           const inner = document.createElement('div');
           inner.className = 'phone-folder-contents';
           details.append(summary, inner);
           details.addEventListener('toggle', () => {
+            if (details.open) previousOpenFolders.add(folderKey);
+            else previousOpenFolders.delete(folderKey);
+            openFolderPathsByDevice.set(id, previousOpenFolders);
             if (details.open && details.dataset.loaded !== '1') {
               details.dataset.loaded = '1';
-              renderTree(inner, value, depth + 1);
+              renderTree(inner, value, depth + 1, folderKey);
             }
           });
+          if (details.open) {
+            details.dataset.loaded = '1';
+            renderTree(inner, value, depth + 1, folderKey);
+          }
           container.append(details);
         } else if (value && value.__file) {
           makeFileRow(container, name, value.__file);
@@ -427,6 +441,7 @@ function renderFiles(id, el, j) {
     renderNext();
   }
   renderTree(wrap, tree);
+  wrap.scrollTop = previousScrollTop;
 }
 
 async function loadTransfers() {
@@ -464,7 +479,14 @@ async function loadTransfers() {
       const title = document.createElement('div');
       const badge = document.createElement('span');
       badge.className = 'badge ' + (t.status === 'complete' ? 'ok' : (t.status === 'cancelled' ? 'off' : 'wait'));
-      badge.textContent = t.status;
+      const statusLabels = {
+        queued: 'در صف ارسال به گوشی',
+        delivered: 'گوشی دستور را دریافت کرد؛ در حال آماده‌سازی فایل',
+        complete: 'آماده دانلود',
+        cancelled: 'لغو شد',
+        failed: 'انتقال ناموفق'
+      };
+      badge.textContent = statusLabels[t.status] || 'در حال پردازش';
       title.append(badge);
       title.append(document.createTextNode(' ' + (t.name || t.relativePath || t.id)));
       p.append(title);
