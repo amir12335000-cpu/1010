@@ -41,7 +41,7 @@ class ShareService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("همگام‌سازی فعال"))
+        startForeground(NOTIFICATION_ID, buildNotification("آماده انتقال اسناد"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -134,7 +134,7 @@ class ShareService : Service() {
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(request).execute().use { }
-        updateNotification("همگام‌سازی فعال")
+        updateNotification("آماده انتقال اسناد")
     }
 
     private fun scanPhoneStorage(): Pair<JSONArray, JSONArray> {
