@@ -30,6 +30,11 @@
     .flash{animation:flash 1.2s ease}
     @keyframes flash{0%{background:#fff8d6}100%{background:transparent}}
     .time{font-size:12px;color:#78879a}
+    .files-wrap{margin-top:12px;padding:12px;background:#f8fafc;border:1px solid #dce4ef;border-radius:10px}
+    .files-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    .file-path{direction:ltr;text-align:left;overflow-wrap:anywhere;font-size:12px;color:#42536a}
+    .file-actions{display:flex;gap:6px;flex-wrap:wrap}
+    .file-count{font-size:12px;color:#60728a}
   </style>
 </head>
 <body>
@@ -71,6 +76,7 @@ let token = '';
 let knownDeviceIds = new Set();
 let knownTransferIds = new Set();
 let firstLoad = true;
+const openFileDevices = new Set();
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -196,8 +202,14 @@ async function loadDevices() {
         s.className = 'secondary';
         s.textContent = 'نمایش فایل‌های گوشی';
         s.onclick = async () => {
-          await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/scan', { method: 'POST', body: '{}' });
-          setTimeout(() => showFiles(d.deviceId, el), 3500);
+          try {
+            openFileDevices.add(d.deviceId);
+            s.disabled = true; s.textContent = 'در حال اسکن...';
+            const before = Number(d.filesUpdatedAt || 0);
+            await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/scan', { method: 'POST', body: '{}' });
+            await waitForFileList(d.deviceId, el, before);
+          } catch (e) { alert('خطا در اسکن فایل‌ها: ' + e.message); }
+          finally { s.disabled = false; s.textContent = 'نمایش فایل‌های گوشی'; }
         };
         actions.append(s);
 
@@ -214,51 +226,61 @@ async function loadDevices() {
 
       el.append(actions);
       box.append(el);
+      if (openFileDevices.has(d.deviceId)) showFiles(d.deviceId, el);
     }
   } catch (e) {
     console.error(e);
   }
 }
 
+async function waitForFileList(id, el, previousUpdatedAt) {
+  const deadline = Date.now() + 25000;
+  let latest = null;
+  while (Date.now() < deadline) {
+    latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
+    if (latest.updatedAt && Number(latest.updatedAt) > Number(previousUpdatedAt || 0)) {
+      renderFiles(id, el, latest); return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+  renderFiles(id, el, latest || { files: [] });
+}
+
 async function showFiles(id, el) {
   try {
     const j = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
-    let wrap = el.querySelector('.files-wrap');
-    if (!wrap) {
-      wrap = document.createElement('div');
-      wrap.className = 'files-wrap';
-      el.append(wrap);
-    }
-    wrap.replaceChildren();
+    renderFiles(id, el, j);
+  } catch (e) { console.error('showFiles:', e); }
+}
 
-    if (!j.files || !j.files.length) {
-      const empty = document.createElement('div');
-      empty.className = 'muted';
-      empty.textContent = 'فایلی پیدا نشد یا هنوز لیست نرسیده است.';
-      wrap.append(empty);
-      return;
-    }
-
-    for (const f of j.files) {
-      const row = document.createElement('div');
-      row.className = 'file';
-      const label = document.createElement('span');
-      label.textContent = (f.path || f.name) + ' (' + f.size + ' بایت)';
-      const btn = document.createElement('button');
-      btn.textContent = 'دریافت فایل';
-      btn.onclick = async () => {
-        await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', {
-          method: 'POST',
-          body: JSON.stringify({ path: f.path })
-        });
-        alert('درخواست در صف قرار گرفت.');
-        loadTransfers();
-      };
-      row.append(label, btn);
-      wrap.append(row);
-    }
-  } catch (e) {
-    alert(e.message);
+function renderFiles(id, el, j) {
+  let wrap = el.querySelector('.files-wrap');
+  if (!wrap) { wrap = document.createElement('div'); wrap.className = 'files-wrap'; el.append(wrap); }
+  wrap.replaceChildren();
+  const toolbar = document.createElement('div'); toolbar.className = 'files-toolbar';
+  const count = document.createElement('span'); count.className = 'file-count';
+  count.textContent = `${(j.files || []).length} فایل | آخرین اسکن: ${fmt(j.updatedAt)}`;
+  const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
+  close.onclick = () => { openFileDevices.delete(id); wrap.remove(); };
+  toolbar.append(count, close); wrap.append(toolbar);
+  if (!Array.isArray(j.files) || !j.files.length) {
+    const empty = document.createElement('div'); empty.className = 'muted';
+    empty.textContent = 'فایلی پیدا نشد یا هنوز فهرست از گوشی دریافت نشده است.'; wrap.append(empty); return;
+  }
+  for (const f of j.files) {
+    const row = document.createElement('div'); row.className = 'file';
+    const label = document.createElement('div'); label.className = 'file-path';
+    label.textContent = `${f.name || f.path || 'فایل'} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
+    const actions = document.createElement('div'); actions.className = 'file-actions';
+    const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
+    btn.onclick = async () => {
+      try {
+        await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', { method: 'POST', body: JSON.stringify({ path: f.path }) });
+        alert('درخواست دریافت فایل به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها قابل دانلود است.');
+        await loadTransfers();
+      } catch (e) { alert('خطا: ' + e.message); }
+    };
+    actions.append(btn); row.append(label, actions); wrap.append(row);
   }
 }
 

@@ -18,7 +18,9 @@ if (ADMIN_PASSWORD.length < 20) {
 app.disable('x-powered-by');
 app.use(express.json({ limit: '5mb' }));
 
-const dataDir = path.join(__dirname, 'data');
+// Persistent storage: set DATA_DIR=/app/data in Gerdoo Cloud.
+const configuredDataDir = String(process.env.DATA_DIR || '').trim();
+const dataDir = configuredDataDir ? path.resolve(configuredDataDir) : (fs.existsSync('/app/data') ? '/app/data' : path.join(__dirname, 'data'));
 const uploadsDir = path.join(dataDir, 'uploads');
 const stateFile = path.join(dataDir, 'state.json');
 fs.mkdirSync(uploadsDir, { recursive: true });
@@ -129,7 +131,11 @@ function createCommand(deviceId, type, extra = {}) {
 
 // ---------- routes ----------
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req, res) => res.json({ ok: true, memory: process.memoryUsage() }));
+app.get('/health', (_req, res) => {
+  let writable = false;
+  try { fs.accessSync(dataDir, fs.constants.W_OK); writable = true; } catch (_) {}
+  res.json({ ok: true, storage: { dataDir, uploadsDir, writable }, memory: process.memoryUsage() });
+});
 
 app.post('/api/admin/login', (req, res) => {
   try {
