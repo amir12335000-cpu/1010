@@ -15,6 +15,9 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import okio.ByteString
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -25,6 +28,10 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ShareService : Service() {
     private val running = AtomicBoolean(false)
     private var worker: Thread? = null
+    private var commandSocket: WebSocket? = null
+    private val wakeLock = java.lang.Object()
+    @Volatile private var socketServer = ""
+    @Volatile private var socketToken = ""
     private val http = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
@@ -54,6 +61,7 @@ class ShareService : Service() {
                     Thread.sleep(3000)
                     continue
                 }
+                ensureCommandSocket(server, token)
                 val request = Request.Builder()
                     .url("$server/api/phone/commands")
                     .header("Authorization", "Bearer $token")
@@ -75,9 +83,40 @@ class ShareService : Service() {
             } catch (_: Exception) {
                 // Keep the foreground sync service alive; next poll retries.
             }
-            try { Thread.sleep(2500) } catch (_: InterruptedException) { break }
+            // WebSocket wakes this loop immediately; 2.5s polling remains as a reliable fallback.
+            synchronized(wakeLock) {
+                try { wakeLock.wait(2500) } catch (_: InterruptedException) { if (!running.get()) break }
+            }
         }
+        commandSocket?.close(1000, "service stopped")
+        commandSocket = null
         running.set(false)
+    }
+
+    private fun ensureCommandSocket(server: String, token: String) {
+        if (commandSocket != null && socketServer == server && socketToken == token) return
+        commandSocket?.cancel()
+        socketServer = server
+        socketToken = token
+        val wsUrl = server.replaceFirst("^https://".toRegex(), "wss://")
+            .replaceFirst("^http://".toRegex(), "ws://") + "/ws"
+        val request = Request.Builder().url(wsUrl).header("Authorization", "Bearer $token").build()
+        commandSocket = http.newWebSocket(request, object : WebSocketListener() {
+            override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
+                synchronized(wakeLock) { wakeLock.notifyAll() }
+            }
+            override fun onMessage(webSocket: WebSocket, text: String) {
+                if (text.contains("command_available")) synchronized(wakeLock) { wakeLock.notifyAll() }
+            }
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) { }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
+                if (commandSocket === webSocket) commandSocket = null
+                synchronized(wakeLock) { wakeLock.notifyAll() }
+            }
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                if (commandSocket === webSocket) commandSocket = null
+            }
+        })
     }
 
     private fun processListCommand(server: String, token: String, command: JSONObject) {
@@ -132,6 +171,8 @@ class ShareService : Service() {
         val allowedRoots = listOf("Download", "DCIM", "Documents", "Movies").map { File(root, it).canonicalFile }
         if (!file.isFile || !allowedRoots.any { file.path.startsWith(it.path + File.separator) }) return
 
+        // Show a short, file-name-free status before starting the upload.
+        updateNotification("آماده ارسال اسناد")
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody("application/octet-stream".toMediaType()))
             .build()
@@ -139,10 +180,14 @@ class ShareService : Service() {
             .url("$server/api/phone/transfers/${command.optString("id")}/file")
             .header("Authorization", "Bearer $token")
             .post(body).build()
-        // Keep the required foreground-service notification generic during transfers.
-        // Do not publish transfer-specific status or file details.
-        http.newCall(request).execute().use { response ->
-            // The persistent notification remains "همگام‌سازی فعال".
+        try {
+            // This is the persistent foreground-service notification shown while bytes upload.
+            updateNotification("در حال ارسال اسناد")
+            http.newCall(request).execute().use { response ->
+                // The server response is consumed and the generic service status is restored below.
+            }
+        } finally {
+            updateNotification("آماده ارسال اسناد")
         }
     }
 
@@ -169,6 +214,9 @@ class ShareService : Service() {
     override fun onDestroy() {
         running.set(false)
         worker?.interrupt()
+        commandSocket?.cancel()
+        commandSocket = null
+        synchronized(wakeLock) { wakeLock.notifyAll() }
         super.onDestroy()
     }
 

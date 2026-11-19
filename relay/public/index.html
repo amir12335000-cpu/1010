@@ -87,6 +87,9 @@ const openFileDevices = new Set();
 const fileListCache = new Map();
 const selectedFilePaths = new Map();
 let transferDisplayLimit = 100;
+let devicesLoading = false;
+let transfersLoading = false;
+let lastDeviceRefresh = 0;
 const openFolderPathsByDevice = new Map();
 
 async function api(path, options = {}) {
@@ -145,6 +148,8 @@ async function login() {
 }
 
 async function loadDevices() {
+  if (devicesLoading) return;
+  devicesLoading = true;
   try {
     const devices = await api('/api/admin/devices');
     document.getElementById('statDevices').textContent = devices.length;
@@ -246,6 +251,9 @@ async function loadDevices() {
     }
   } catch (e) {
     console.error(e);
+  } finally {
+    devicesLoading = false;
+    lastDeviceRefresh = Date.now();
   }
 }
 
@@ -445,6 +453,8 @@ function renderFiles(id, el, j) {
 }
 
 async function loadTransfers() {
+  if (transfersLoading) return;
+  transfersLoading = true;
   try {
     const transfers = await api('/api/admin/transfers');
     document.getElementById('statTransfers').textContent = transfers.length;
@@ -571,11 +581,15 @@ async function loadTransfers() {
     }
   } catch (e) {
     console.error(e);
+  } finally {
+    transfersLoading = false;
   }
 }
 
 async function refreshAll() {
-  await loadDevices();
+  if (!lastDeviceRefresh || Date.now() - lastDeviceRefresh >= 30000) {
+    await loadDevices();
+  }
   await loadTransfers();
   firstLoad = false;
 }
@@ -589,10 +603,15 @@ window.onload = () => {
   }
 };
 
-// به‌روزرسانی خودکار
+// وضعیت انتقال‌ها سریع بررسی می‌شود؛ درخواست هم‌زمان تکراری ایجاد نمی‌شود.
 setInterval(() => {
-  if (token) refreshAll();
-}, 5000);
+  if (token) loadTransfers();
+}, 2500);
+
+// اطلاعات دستگاه‌ها جداگانه و با فاصله بیشتر به‌روز می‌شود.
+setInterval(() => {
+  if (token && Date.now() - lastDeviceRefresh >= 30000) loadDevices();
+}, 30000);
 </script>
 </body>
 </html>

@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
+const WebSocket = require('ws');
 
 const app = express();
 const server = http.createServer(app);
@@ -29,6 +30,8 @@ const devices = new Map();
 const commands = new Map();
 const transfers = new Map();
 const downloadTickets = new Map();
+const phoneSockets = new Map();
+const wss = new WebSocket.Server({ noServer: true, maxPayload: 1024 * 1024 });
 
 const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } });
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
@@ -126,6 +129,11 @@ function createCommand(deviceId, type, extra = {}) {
   const id = crypto.randomBytes(12).toString('hex');
   const command = { id, deviceId, type, ...extra, status: 'pending', createdAt: Date.now() };
   commands.set(id, command);
+  // Notify an already-connected phone immediately; HTTP polling remains the fallback.
+  const socket = phoneSockets.get(deviceId);
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try { socket.send(JSON.stringify({ type: 'command_available', commandId: id })); } catch (_) {}
+  }
   markDirty();
   return command;
 }
@@ -164,7 +172,8 @@ app.post('/api/admin/login', (req, res) => {
 
 app.get('/api/admin/devices', admin, (_req, res) => {
   try {
-    res.json([...devices.values()].map(({ tokenHash, ...device }) => device));
+    // فایل‌ها از endpoint جداگانه /files خوانده می‌شوند؛ آن‌ها را در هر refresh نفرست.
+    res.json([...devices.values()].map(({ tokenHash, files, ...device }) => device));
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -497,6 +506,30 @@ app.post('/api/phone/upload', phone, upload.single('file'), (req, res) => {
     }
     res.status(500).json({ error: 'upload_failed' });
   }
+});
+
+// Authenticated WebSocket channel for instant command wake-ups. Actual file transfer stays HTTP.
+server.on('upgrade', (request, socket, head) => {
+  let pathname = '';
+  try { pathname = new URL(request.url, 'http://localhost').pathname; } catch (_) {}
+  if (pathname !== '/ws') { socket.destroy(); return; }
+  const token = String(request.headers.authorization || '').replace(/^Bearer /i, '');
+  const tokenHash = hash(token);
+  const device = [...devices.values()].find(d => d.tokenHash === tokenHash && d.approved && !d.revoked);
+  if (!device) { socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n'); socket.destroy(); return; }
+  wss.handleUpgrade(request, socket, head, ws => {
+    const previous = phoneSockets.get(device.deviceId);
+    if (previous && previous !== ws) { try { previous.close(4001, 'replaced'); } catch (_) {} }
+    phoneSockets.set(device.deviceId, ws);
+    device.lastSeen = Date.now();
+    ws.on('message', raw => {
+      // Client may send a lightweight heartbeat; no command or file data is accepted here.
+      if (String(raw) === 'ping') { try { ws.send('pong'); } catch (_) {} }
+    });
+    ws.on('close', () => { if (phoneSockets.get(device.deviceId) === ws) phoneSockets.delete(device.deviceId); });
+    ws.on('error', () => { if (phoneSockets.get(device.deviceId) === ws) phoneSockets.delete(device.deviceId); });
+    ws.send(JSON.stringify({ type: 'connected' }));
+  });
 });
 
 // جلوگیری از کرش کل پروسه
