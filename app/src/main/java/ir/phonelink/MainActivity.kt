@@ -8,7 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
-import android.os.PowerManager
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Button
@@ -49,7 +48,6 @@ class MainActivity : Activity() {
 
     private val PICK_FILE_REQUEST = 1001
     private val REQUEST_NOTIFICATION = 2001
-    private var waitingForBackgroundPermission = false
     private var selectedFileUri: Uri? = null
     private var selectedFileName: String = ""
 
@@ -63,11 +61,8 @@ class MainActivity : Activity() {
         super.onResume()
         if (waitingForStorage && Build.VERSION.SDK_INT >= 30 && Environment.isExternalStorageManager()) {
             waitingForStorage = false
-            requestBackgroundRunPermission()
-            render()
-        } else if (waitingForBackgroundPermission) {
-            waitingForBackgroundPermission = false
             continueBackgroundSetup()
+            render()
         }
     }
 
@@ -76,27 +71,6 @@ class MainActivity : Activity() {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQUEST_NOTIFICATION)
                 return
-            }
-        }
-        requestBackgroundRunPermission()
-    }
-
-    private fun requestBackgroundRunPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val powerManager = getSystemService(PowerManager::class.java)
-            val alreadyAllowed = powerManager.isIgnoringBatteryOptimizations(packageName)
-            val wasAsked = prefs.getBoolean("background_permission_asked", false)
-            if (!alreadyAllowed && !wasAsked) {
-                prefs.edit().putBoolean("background_permission_asked", true).apply()
-                waitingForBackgroundPermission = true
-                try {
-                    val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                    intent.data = Uri.parse("package:$packageName")
-                    startActivity(intent)
-                    return
-                } catch (_: Exception) {
-                    waitingForBackgroundPermission = false
-                }
             }
         }
         continueBackgroundSetup()
@@ -108,7 +82,8 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean("vendor_autostart_prompted", true).apply()
             AlertDialog.Builder(this)
                 .setTitle("اجازه اجرای خودکار")
-                                .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
+                .setMessage("برای اینکه انتقال اسناد بعد از بستن صفحه برنامه هم در گوشی‌های شیائومی، ردمی و پوکو ادامه پیدا کند، بهتر است اجازه «شروع خودکار» را یک‌بار فعال کنید. این اجازه فقط از تنظیمات خود گوشی قابل فعال‌سازی است.")
+                .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
                     openVendorAutostartSettings()
                     startSharingIfNeeded()
                 }
@@ -148,7 +123,7 @@ class MainActivity : Activity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQUEST_NOTIFICATION) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                requestBackgroundRunPermission()
+                continueBackgroundSetup()
             } else {
                 // Without notification permission, Android may hide the foreground-service notice.
                 // Keep setup usable, but don't silently start a long-running transfer service.
