@@ -77,6 +77,8 @@ let knownDeviceIds = new Set();
 let knownTransferIds = new Set();
 let firstLoad = true;
 const openFileDevices = new Set();
+// نگهداری فهرست فایل‌ها بین نوبت‌های تازه‌سازی داشبورد
+const fileListCache = new Map();
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -155,6 +157,7 @@ async function loadDevices() {
     for (const d of devices) {
       const el = document.createElement('div');
       el.className = 'row';
+      el.dataset.deviceId = d.deviceId;
 
       const title = document.createElement('div');
       const name = document.createElement('b');
@@ -226,34 +229,56 @@ async function loadDevices() {
 
       el.append(actions);
       box.append(el);
-      if (openFileDevices.has(d.deviceId)) showFiles(d.deviceId, el);
+      if (openFileDevices.has(d.deviceId)) {
+        const cached = fileListCache.get(d.deviceId);
+        if (cached) renderFiles(d.deviceId, el, cached);
+        else showFiles(d.deviceId, el);
+      }
     }
   } catch (e) {
     console.error(e);
   }
 }
 
+function currentDeviceElement(id, fallback) {
+  // loadDevices هر چند ثانیه کارت‌ها را از نو می‌سازد؛ همیشه کارت فعلی را پیدا کن.
+  const current = [...document.querySelectorAll('#devices [data-device-id]')]
+    .find(node => node.dataset.deviceId === id);
+  return current || (fallback && fallback.isConnected ? fallback : null);
+}
+
 async function waitForFileList(id, el, previousUpdatedAt) {
   const deadline = Date.now() + 25000;
-  let latest = null;
+  let latest = fileListCache.get(id) || null;
   while (Date.now() < deadline) {
     latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
+    fileListCache.set(id, latest);
+    const target = currentDeviceElement(id, el);
+    if (target) renderFiles(id, target, latest);
     if (latest.updatedAt && Number(latest.updatedAt) > Number(previousUpdatedAt || 0)) {
-      renderFiles(id, el, latest); return;
+      return;
     }
     await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  renderFiles(id, el, latest || { files: [] });
+  if (latest) {
+    fileListCache.set(id, latest);
+    const target = currentDeviceElement(id, el);
+    if (target) renderFiles(id, target, latest);
+  }
 }
 
 async function showFiles(id, el) {
   try {
     const j = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
-    renderFiles(id, el, j);
+    fileListCache.set(id, j);
+    const target = currentDeviceElement(id, el);
+    if (target) renderFiles(id, target, j);
   } catch (e) { console.error('showFiles:', e); }
 }
 
 function renderFiles(id, el, j) {
+  if (!el || !el.isConnected) return;
+  fileListCache.set(id, j);
   let wrap = el.querySelector('.files-wrap');
   if (!wrap) { wrap = document.createElement('div'); wrap.className = 'files-wrap'; el.append(wrap); }
   wrap.replaceChildren();
@@ -261,7 +286,7 @@ function renderFiles(id, el, j) {
   const count = document.createElement('span'); count.className = 'file-count';
   count.textContent = `${(j.files || []).length} فایل | آخرین اسکن: ${fmt(j.updatedAt)}`;
   const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
-  close.onclick = () => { openFileDevices.delete(id); wrap.remove(); };
+  close.onclick = () => { openFileDevices.delete(id); fileListCache.delete(id); wrap.remove(); };
   toolbar.append(count, close); wrap.append(toolbar);
   if (!Array.isArray(j.files) || !j.files.length) {
     const empty = document.createElement('div'); empty.className = 'muted';
