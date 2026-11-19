@@ -28,6 +28,7 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 const devices = new Map();
 const commands = new Map();
 const transfers = new Map();
+const downloadTickets = new Map();
 
 const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } });
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
@@ -299,15 +300,35 @@ app.get('/api/admin/transfers', admin, (_req, res) => {
   }
 });
 
-app.get('/api/admin/transfers/:id/download', admin, (req, res) => {
+app.post('/api/admin/transfers/:id/download-ticket', admin, (req, res) => {
   try {
+    const transfer = transfers.get(req.params.id);
+    if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
+      return res.status(404).json({ error: 'not_ready' });
+    }
+    const ticket = crypto.randomBytes(24).toString('hex');
+    downloadTickets.set(ticket, { transferId: transfer.id, expiresAt: Date.now() + 60_000 });
+    res.json({ ticket });
+  } catch (e) {
+    res.status(500).json({ error: 'download_ticket_failed' });
+  }
+});
+
+app.get('/api/admin/transfers/:id/download', (req, res) => {
+  try {
+    const ticket = String(req.query.ticket || '');
+    const ticketData = downloadTickets.get(ticket);
+    if (!ticketData || ticketData.transferId !== req.params.id || ticketData.expiresAt < Date.now()) {
+      return res.status(401).json({ error: 'invalid_or_expired_download_ticket' });
+    }
+    downloadTickets.delete(ticket);
     const transfer = transfers.get(req.params.id);
     if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
       return res.status(404).json({ error: 'not_ready' });
     }
     res.download(transfer.savedPath, transfer.name);
   } catch (e) {
-    res.status(500).json({ error: 'server_error' });
+    res.status(500).json({ error: 'download_failed' });
   }
 });
 

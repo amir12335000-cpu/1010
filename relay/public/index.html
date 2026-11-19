@@ -497,17 +497,42 @@ async function loadTransfers() {
         const b = document.createElement('button');
         b.textContent = 'دانلود';
         b.onclick = async () => {
-          const r = await fetch('/api/admin/transfers/' + t.id + '/download', {
-            headers: { Authorization: 'Bearer ' + token }
-          });
-          if (!r.ok) { alert('دانلود ممکن نیست'); return; }
-          const blob = await r.blob();
-          const u = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = u;
-          a.download = t.name || 'file.bin';
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(u), 60000);
+          // پنجره را هم‌زمان با کلیک کاربر باز می‌کنیم تا مرورگر دانلود را مسدود نکند.
+          const downloadWindow = window.open('about:blank', '_blank');
+          b.disabled = true;
+          const originalText = b.textContent;
+          b.textContent = 'آماده‌سازی دانلود...';
+          try {
+            const ticketResponse = await fetch('/api/admin/transfers/' + encodeURIComponent(t.id) + '/download-ticket', {
+              method: 'POST',
+              headers: { Authorization: 'Bearer ' + token }
+            });
+            if (!ticketResponse.ok) {
+              const message = await ticketResponse.text();
+              throw new Error(message || 'ساخت لینک دانلود ناموفق بود');
+            }
+            const data = await ticketResponse.json();
+            if (!data.ticket) throw new Error('لینک دانلود معتبر دریافت نشد');
+            const downloadUrl = '/api/admin/transfers/' + encodeURIComponent(t.id) +
+              '/download?ticket=' + encodeURIComponent(data.ticket);
+            if (downloadWindow && !downloadWindow.closed) {
+              downloadWindow.location.href = downloadUrl;
+            } else {
+              const link = document.createElement('a');
+              link.href = downloadUrl;
+              link.download = t.name || 'file.bin';
+              link.rel = 'noopener';
+              document.body.appendChild(link);
+              link.click();
+              link.remove();
+            }
+          } catch (e) {
+            if (downloadWindow && !downloadWindow.closed) downloadWindow.close();
+            alert('دانلود انجام نشد: ' + e.message);
+          } finally {
+            b.disabled = false;
+            b.textContent = originalText;
+          }
         };
         actions.append(b);
       }
