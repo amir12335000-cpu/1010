@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.PowerManager
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.widget.Button
@@ -83,6 +84,30 @@ class MainActivity : Activity() {
 
     /** Complete the one-time background setup without changing server or transfer behavior. */
     private fun continueBackgroundSetup() {
+        // Ask once for battery-optimization exemption so Android is less likely to
+        // suspend Pushy while the app is not visible. This does not override force-stop.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(PowerManager::class.java)
+            val batteryPrompted = prefs.getBoolean("battery_optimization_prompted", false)
+            if (powerManager != null &&
+                !powerManager.isIgnoringBatteryOptimizations(packageName) &&
+                !batteryPrompted
+            ) {
+                prefs.edit().putBoolean("battery_optimization_prompted", true).apply()
+                try {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                            Uri.parse("package:$packageName")
+                        )
+                    )
+                    return
+                } catch (_: Exception) {
+                    // Continue setup if this device does not support the direct request.
+                }
+            }
+        }
+
         if (isXiaomiFamily() && !prefs.getBoolean("vendor_autostart_prompted", false)) {
             prefs.edit().putBoolean("vendor_autostart_prompted", true).apply()
             AlertDialog.Builder(this)
