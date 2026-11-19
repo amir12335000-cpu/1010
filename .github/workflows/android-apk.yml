@@ -1,8 +1,17 @@
+
 name: Build Android APK
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'gradle/**'
+      - 'gradlew'
+      - '*.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/android-apk.yml'
   workflow_dispatch:
 
 permissions:
@@ -10,9 +19,11 @@ permissions:
 
 jobs:
   build:
+    name: Build release APK
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout source
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Java 17
@@ -20,14 +31,15 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Make Gradle wrapper executable
+      - name: Grant execute permission to Gradle
         run: chmod +x ./gradlew
 
-      - name: Build release APK
-      ./gradlew --no-daemon -PserverBaseUrl=https://1010.gerdoo.app :app:assembleRelease
+      - name: Build APK with server URL
+        run: ./gradlew --no-daemon -PserverBaseUrl=https://1010.gerdoo.app :app:assembleRelease
 
-      - name: Upload APK
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
           name: 1010-release-apk
