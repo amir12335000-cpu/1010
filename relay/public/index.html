@@ -86,6 +86,7 @@ const openFileDevices = new Set();
 // نگهداری فهرست فایل‌ها بین نوبت‌های تازه‌سازی داشبورد
 const fileListCache = new Map();
 const selectedFilePaths = new Map();
+let transferDisplayLimit = 100;
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -361,46 +362,69 @@ function renderFiles(id, el, j) {
     }
   }
 
+  function makeFileRow(container, name, f) {
+    const row = document.createElement('div'); row.className = 'file';
+    const label = document.createElement('div'); label.className = 'file-path';
+    label.textContent = `📄 ${name} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
+    const actions = document.createElement('div'); actions.className = 'file-actions';
+    const selector = document.createElement('label'); selector.className = 'file-select';
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(f.path);
+    checkbox.onchange = () => { if (checkbox.checked) selected.add(f.path); else selected.delete(f.path); updateBatchBar(); };
+    selector.append(checkbox); actions.append(selector);
+    const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
+    btn.onclick = async () => {
+      try {
+        await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', { method: 'POST', body: JSON.stringify({ path: f.path }) });
+        alert('درخواست دریافت فایل به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها قابل دانلود است.');
+        await loadTransfers();
+      } catch (e) { alert('خطا: ' + e.message); }
+    };
+    actions.append(btn); row.append(label, actions); container.append(row);
+  }
+
+  // ساخت تدریجی درخت: زیرپوشه‌ها فقط هنگام باز شدن ساخته می‌شوند
+  // و در هر پوشه حداکثر ۱۰۰ مورد در هر مرحله به DOM اضافه می‌شود.
   function renderTree(container, nodes, depth = 0) {
     const entries = [...nodes.entries()].sort((a, b) => {
       const aFolder = a[1] instanceof Map, bFolder = b[1] instanceof Map;
       if (aFolder !== bFolder) return aFolder ? -1 : 1;
       return a[0].localeCompare(b[0], 'fa');
     });
-    for (const [name, value] of entries) {
-      if (value instanceof Map) {
-        const details = document.createElement('details');
-        details.className = 'phone-folder';
-        details.open = depth === 0;
-        const summary = document.createElement('summary');
-        summary.textContent = '📁 ' + name;
-        details.append(summary);
-        const inner = document.createElement('div');
-        inner.className = 'phone-folder-contents';
-        renderTree(inner, value, depth + 1);
-        details.append(inner);
-        container.append(details);
-      } else if (value && value.__file) {
-        const f = value.__file;
-        const row = document.createElement('div'); row.className = 'file';
-        const label = document.createElement('div'); label.className = 'file-path';
-        label.textContent = `📄 ${name} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
-        const actions = document.createElement('div'); actions.className = 'file-actions';
-        const selector = document.createElement('label'); selector.className = 'file-select';
-        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(f.path);
-        checkbox.onchange = () => { if (checkbox.checked) selected.add(f.path); else selected.delete(f.path); updateBatchBar(); };
-        selector.append(checkbox); actions.append(selector);
-        const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
-        btn.onclick = async () => {
-          try {
-            await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', { method: 'POST', body: JSON.stringify({ path: f.path }) });
-            alert('درخواست دریافت فایل به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها قابل دانلود است.');
-            await loadTransfers();
-          } catch (e) { alert('خطا: ' + e.message); }
-        };
-        actions.append(btn); row.append(label, actions); container.append(row);
+    let cursor = 0;
+    const renderNext = () => {
+      const stop = Math.min(cursor + 100, entries.length);
+      while (cursor < stop) {
+        const [name, value] = entries[cursor++];
+        if (value instanceof Map) {
+          const details = document.createElement('details');
+          details.className = 'phone-folder';
+          const summary = document.createElement('summary');
+          summary.textContent = '📁 ' + name;
+          const inner = document.createElement('div');
+          inner.className = 'phone-folder-contents';
+          details.append(summary, inner);
+          details.addEventListener('toggle', () => {
+            if (details.open && details.dataset.loaded !== '1') {
+              details.dataset.loaded = '1';
+              renderTree(inner, value, depth + 1);
+            }
+          });
+          container.append(details);
+        } else if (value && value.__file) {
+          makeFileRow(container, name, value.__file);
+        }
       }
-    }
+      const oldMore = container.querySelector(':scope > .file-more');
+      if (oldMore) oldMore.remove();
+      if (cursor < entries.length) {
+        const more = document.createElement('button');
+        more.className = 'secondary file-more';
+        more.textContent = `نمایش ۱۰۰ مورد بعدی (${entries.length - cursor} مورد باقی‌مانده)`;
+        more.onclick = () => { more.remove(); renderNext(); };
+        container.append(more);
+      }
+    };
+    renderNext();
   }
   renderTree(wrap, tree);
 }
@@ -433,7 +457,7 @@ async function loadTransfers() {
       return;
     }
 
-    for (const t of transfers) {
+    for (const t of transfers.slice(0, transferDisplayLimit)) {
       const p = document.createElement('div');
       p.className = 'row';
 
@@ -490,6 +514,13 @@ async function loadTransfers() {
 
       p.append(actions);
       box.append(p);
+    }
+    if (transfers.length > transferDisplayLimit) {
+      const more = document.createElement('button');
+      more.className = 'secondary';
+      more.textContent = `نمایش ۱۰۰ انتقال بعدی (${transfers.length - transferDisplayLimit} مورد باقی‌مانده)`;
+      more.onclick = () => { transferDisplayLimit += 100; loadTransfers(); };
+      box.append(more);
     }
   } catch (e) {
     console.error(e);
