@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      SERVER_BASE_URL: "https://1212.gerdoo.app"
+      SERVER_BASE_URL: "https://1010.gerdoo.app"
 
     steps:
       - name: Checkout
