@@ -108,8 +108,7 @@ class MainActivity : Activity() {
             prefs.edit().putBoolean("vendor_autostart_prompted", true).apply()
             AlertDialog.Builder(this)
                 .setTitle("اجازه اجرای خودکار")
-                .setMessage("برای اینکه انتقال اسناد بعد از بستن صفحه برنامه هم در گوشی‌های شیائومی، ردمی و پوکو ادامه پیدا کند، بهتر است اجازه «شروع خودکار» را یک‌بار فعال کنید. این اجازه فقط از تنظیمات خود گوشی قابل فعال‌سازی است.")
-                .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
+                                .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
                     openVendorAutostartSettings()
                     startSharingIfNeeded()
                 }
