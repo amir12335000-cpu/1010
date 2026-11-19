@@ -105,15 +105,43 @@ class ShareService : Service() {
         val root = Environment.getExternalStorageDirectory()
         var count = 0
 
-        fun walk(dir: File) {
-            if (count >= 2000) return
+        // پوشه‌هایی که اسکن می‌شوند
+        val allowed = setOf(
+            "download", "downloads",
+            "documents", "document",
+            "dcim",
+            "pictures", "picture",
+            "screenshot", "screenshots",
+            "movies", "movie"
+        )
+
+        // فقط واتساپ و پوشه‌های سیستمی رد شوند
+        val blocked = setOf(
+            "whatsapp", "android", "obb", "data"
+        )
+
+        fun walk(dir: File, isRoot: Boolean = false) {
+            if (count >= 1500) return
             val files = dir.listFiles() ?: return
+
             for (f in files) {
-                if (count >= 2000) break
-                if (f.name.startsWith(".") || f.name == "Android") continue
+                if (count >= 1500) break
+
+                val nameLower = f.name.lowercase()
+
+                // رد کردن پوشه‌های ممنوع و مخفی
+                if (f.name.startsWith(".") || blocked.any { nameLower.contains(it) }) continue
+
                 if (f.isDirectory) {
-                    walk(f)
-                } else if (f.isFile) {
+                    if (isRoot) {
+                        // در ریشه فقط پوشه‌های مجاز
+                        if (allowed.any { nameLower.contains(it) }) {
+                            walk(f, false)
+                        }
+                    } else {
+                        walk(f, false)
+                    }
+                } else if (f.isFile && f.canRead()) {
                     try {
                         out.put(
                             JSONObject()
@@ -127,7 +155,8 @@ class ShareService : Service() {
                 }
             }
         }
-        walk(root)
+
+        walk(root, true)
         return out
     }
 
