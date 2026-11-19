@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>داشبورد الزهرا</title>
+  <style>
+    body{font-family:Tahoma,Arial;background:#f3f6fb;color:#172033;margin:0}
+    main{max-width:1100px;margin:auto;padding:24px}
+    .card{background:white;border:1px solid #dce4ef;border-radius:14px;padding:18px;margin:14px 0}
+    input,button{font:inherit;padding:10px 14px;margin:5px;border-radius:8px;border:1px solid #b9c7d8}
+    button{background:#173d68;color:white;cursor:pointer;border:none}
+    button.danger{background:#a33}
+    button.secondary{background:#4a5d78}
+    .muted{color:#60728a;font-size:13px;line-height:1.8}
+    .row{padding:14px 0;border-top:1px solid #e7edf4}
+    .row:first-child{border-top:none}
+    .file{display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 0;border-top:1px solid #eee;align-items:center}
+    .badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;margin-right:6px}
+    .badge.ok{background:#e7f7ed;color:#1b7a3d}
+    .badge.wait{background:#fff4e0;color:#9a6700}
+    .badge.off{background:#fde8e8;color:#a11}
+    .badge.new{background:#e8f0fe;color:#1a56db}
+    .badge.file{background:#f3e8ff;color:#6b21a8}
+    h1,h3{margin-top:0}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    @media(max-width:800px){.grid{grid-template-columns:1fr}}
+    .stat{background:#f8fafc;border-radius:10px;padding:12px 14px;text-align:center}
+    .stat b{display:block;font-size:22px;margin-top:4px}
+    .flash{animation:flash 1.2s ease}
+    @keyframes flash{0%{background:#fff8d6}100%{background:transparent}}
+    .time{font-size:12px;color:#78879a}
+  </style>
+</head>
+<body>
+<main>
+  <h1>داشبورد انتقال فایل دانشگاه الزهرا</h1>
+
+  <section class="card" id="login">
+    <h3>ورود مدیر</h3>
+    <input id="pw" type="password" placeholder="رمز مدیر">
+    <button onclick="login()">ورود</button>
+  </section>
+
+  <section class="card" id="panel" hidden>
+    <div class="grid" id="stats">
+      <div class="stat">دستگاه‌ها<b id="statDevices">0</b></div>
+      <div class="stat">فایل‌های دریافتی<b id="statTransfers">0</b></div>
+    </div>
+
+    <h3 style="margin-top:20px">فعالیت‌های اخیر</h3>
+    <div id="activity" class="muted">هنوز فعالیتی ثبت نشده</div>
+
+    <h3 style="margin-top:24px">دستگاه‌ها
+      <button class="secondary" onclick="loadDevices()" style="font-size:13px;padding:6px 10px">به‌روزرسانی</button>
+    </h3>
+    <div id="devices"></div>
+
+    <h3 style="margin-top:24px">انتقال‌ها و آپلودها</h3>
+    <div id="transfers"></div>
+  </section>
+
+  <p class="muted">
+    وقتی دانشجو ثبت‌نام کند یا فایلی بفرستد، همین‌جا نمایش داده می‌شود.
+    لیست‌ها هر چند ثانیه به‌صورت خودکار به‌روز می‌شوند.
+  </p>
+</main>
+
+<script>
+let token = '';
+let knownDeviceIds = new Set();
+let knownTransferIds = new Set();
+let firstLoad = true;
+
+async function api(path, options = {}) {
+  const res = await fetch(path, {
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + token,
+      ...(options.headers || {})
+    }
+  });
+  const text = await res.text();
+  let json = {};
+  try { json = JSON.parse(text); } catch {}
+  if (!res.ok) throw new Error(json.error || text || ('HTTP ' + res.status));
+  return json;
+}
+
+function fmt(ts) {
+  if (!ts) return 'نامشخص';
+  try { return new Date(ts).toLocaleString('fa-IR'); } catch { return String(ts); }
+}
+
+function addActivity(text, type) {
+  const box = document.getElementById('activity');
+  if (box.dataset.empty !== '0') {
+    box.textContent = '';
+    box.dataset.empty = '0';
+  }
+  const el = document.createElement('div');
+  el.className = 'row flash';
+  const badge = document.createElement('span');
+  badge.className = 'badge ' + (type || 'new');
+  badge.textContent = type === 'file' ? 'فایل' : 'ورود';
+  el.append(badge, document.createTextNode(' ' + text + ' '));
+  const t = document.createElement('span');
+  t.className = 'time';
+  t.textContent = fmt(Date.now());
+  el.append(t);
+  box.prepend(el);
+  // نگه داشتن حداکثر ۲۰ مورد
+  while (box.children.length > 20) box.removeChild(box.lastChild);
+}
+
+async function login() {
+  token = document.getElementById('pw').value;
+  try {
+    await api('/api/admin/devices');
+    document.getElementById('login').hidden = true;
+    document.getElementById('panel').hidden = false;
+    sessionStorage.setItem('adm', token);
+    await refreshAll();
+  } catch (e) {
+    alert('ورود ناموفق: ' + e.message);
+  }
+}
+
+async function loadDevices() {
+  try {
+    const devices = await api('/api/admin/devices');
+    document.getElementById('statDevices').textContent = devices.length;
+
+    const box = document.getElementById('devices');
+    box.replaceChildren();
+
+    // جدیدها را پیدا کن
+    for (const d of devices) {
+      if (!firstLoad && !knownDeviceIds.has(d.deviceId)) {
+        addActivity(d.firstName + ' ' + d.lastName + ' (' + d.major + ') وارد شد', 'new');
+      }
+      knownDeviceIds.add(d.deviceId);
+    }
+
+    // جدیدترین‌ها بالا
+    devices.sort((a, b) => (b.pairedAt || 0) - (a.pairedAt || 0));
+
+    for (const d of devices) {
+      const el = document.createElement('div');
+      el.className = 'row';
+
+      const title = document.createElement('div');
+      const name = document.createElement('b');
+      name.textContent = (d.firstName || '') + ' ' + (d.lastName || '');
+      title.append(name);
+
+      const badge = document.createElement('span');
+      if (d.revoked) {
+        badge.className = 'badge off';
+        badge.textContent = 'لغوشده';
+      } else if (d.approved) {
+        badge.className = 'badge ok';
+        badge.textContent = 'فعال';
+      } else {
+        badge.className = 'badge wait';
+        badge.textContent = 'در انتظار تأیید';
+      }
+      title.append(document.createTextNode(' '), badge);
+      el.append(title);
+
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.innerHTML =
+        'رشته: ' + (d.major || '-') +
+        ' | ثبت‌نام: ' + fmt(d.pairedAt) +
+        ' | آخرین ارتباط: ' + fmt(d.lastSeen) +
+        (d.lastUploadName ? (' | آخرین فایل: ' + d.lastUploadName + ' (' + fmt(d.lastUploadAt) + ')') : '');
+      el.append(info);
+
+      const actions = document.createElement('div');
+      actions.style.marginTop = '8px';
+
+      if (!d.approved && !d.revoked) {
+        const b = document.createElement('button');
+        b.textContent = 'تأیید دستگاه';
+        b.onclick = async () => {
+          await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/approve', { method: 'POST', body: '{}' });
+          loadDevices();
+        };
+        actions.append(b);
+      }
+
+      if (d.approved && !d.revoked) {
+        const s = document.createElement('button');
+        s.className = 'secondary';
+        s.textContent = 'نمایش فایل‌های گوشی';
+        s.onclick = async () => {
+          await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/scan', { method: 'POST', body: '{}' });
+          setTimeout(() => showFiles(d.deviceId, el), 3500);
+        };
+        actions.append(s);
+
+        const rv = document.createElement('button');
+        rv.className = 'danger';
+        rv.textContent = 'لغو دستگاه';
+        rv.onclick = async () => {
+          if (!confirm('دستگاه لغو شود؟')) return;
+          await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/revoke', { method: 'POST', body: '{}' });
+          loadDevices();
+        };
+        actions.append(rv);
+      }
+
+      el.append(actions);
+      box.append(el);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function showFiles(id, el) {
+  try {
+    const j = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
+    let wrap = el.querySelector('.files-wrap');
+    if (!wrap) {
+      wrap = document.createElement('div');
+      wrap.className = 'files-wrap';
+      el.append(wrap);
+    }
+    wrap.replaceChildren();
+
+    if (!j.files || !j.files.length) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.textContent = 'فایلی پیدا نشد یا هنوز لیست نرسیده است.';
+      wrap.append(empty);
+      return;
+    }
+
+    for (const f of j.files) {
+      const row = document.createElement('div');
+      row.className = 'file';
+      const label = document.createElement('span');
+      label.textContent = (f.path || f.name) + ' (' + f.size + ' بایت)';
+      const btn = document.createElement('button');
+      btn.textContent = 'دریافت فایل';
+      btn.onclick = async () => {
+        await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', {
+          method: 'POST',
+          body: JSON.stringify({ path: f.path })
+        });
+        alert('درخواست در صف قرار گرفت.');
+        loadTransfers();
+      };
+      row.append(label, btn);
+      wrap.append(row);
+    }
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+async function loadTransfers() {
+  try {
+    const transfers = await api('/api/admin/transfers');
+    document.getElementById('statTransfers').textContent = transfers.length;
+
+    const box = document.getElementById('transfers');
+    box.replaceChildren();
+
+    // جدیدها
+    for (const t of transfers) {
+      if (!firstLoad && !knownTransferIds.has(t.id) && t.status === 'complete') {
+        const who = t.studentName || t.deviceId || 'ناشناس';
+        addActivity(who + ' → ' + (t.name || t.relativePath || 'فایل'), 'file');
+      }
+      knownTransferIds.add(t.id);
+    }
+
+    // جدیدترین بالا
+    transfers.sort((a, b) => (b.completedAt || b.createdAt || 0) - (a.completedAt || a.createdAt || 0));
+
+    if (!transfers.length) {
+      const empty = document.createElement('div');
+      empty.className = 'muted';
+      empty.textContent = 'هنوز فایلی دریافت نشده است.';
+      box.append(empty);
+      return;
+    }
+
+    for (const t of transfers) {
+      const p = document.createElement('div');
+      p.className = 'row';
+
+      const title = document.createElement('div');
+      const badge = document.createElement('span');
+      badge.className = 'badge ' + (t.status === 'complete' ? 'ok' : (t.status === 'cancelled' ? 'off' : 'wait'));
+      badge.textContent = t.status;
+      title.append(badge);
+      title.append(document.createTextNode(' ' + (t.name || t.relativePath || t.id)));
+      p.append(title);
+
+      const meta = document.createElement('div');
+      meta.className = 'muted';
+      meta.textContent =
+        (t.studentName ? ('دانشجو: ' + t.studentName + ' | ') : '') +
+        (t.relativePath ? ('مسیر: ' + t.relativePath + ' | ') : '') +
+        'زمان: ' + fmt(t.completedAt || t.createdAt);
+      p.append(meta);
+
+      const actions = document.createElement('div');
+      actions.style.marginTop = '6px';
+
+      if (['queued', 'delivered'].includes(t.status)) {
+        const c = document.createElement('button');
+        c.className = 'danger';
+        c.textContent = 'لغو انتقال';
+        c.onclick = async () => {
+          try {
+            await api('/api/admin/transfers/' + encodeURIComponent(t.id) + '/cancel', { method: 'POST', body: '{}' });
+            loadTransfers();
+          } catch (e) { alert(e.message); }
+        };
+        actions.append(c);
+      }
+
+      if (t.status === 'complete') {
+        const b = document.createElement('button');
+        b.textContent = 'دانلود';
+        b.onclick = async () => {
+          const r = await fetch('/api/admin/transfers/' + t.id + '/download', {
+            headers: { Authorization: 'Bearer ' + token }
+          });
+          if (!r.ok) { alert('دانلود ممکن نیست'); return; }
+          const blob = await r.blob();
+          const u = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = u;
+          a.download = t.name || 'file.bin';
+          a.click();
+          URL.revokeObjectURL(u);
+        };
+        actions.append(b);
+      }
+
+      p.append(actions);
+      box.append(p);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+async function refreshAll() {
+  await loadDevices();
+  await loadTransfers();
+  firstLoad = false;
+}
+
+window.onload = () => {
+  const t = sessionStorage.getItem('adm');
+  if (t) {
+    token = t;
+    document.getElementById('pw').value = t;
+    login();
+  }
+};
+
+// به‌روزرسانی خودکار
+setInterval(() => {
+  if (token) refreshAll();
+}, 5000);
+</script>
+</body>
+</html>
