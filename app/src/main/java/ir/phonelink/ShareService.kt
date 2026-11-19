@@ -1,203 +1,319 @@
-package ir.phonelink
+const express = require('express');
+const http = require('http');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
-import android.content.Intent
-import android.os.Build
-import android.os.Environment
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
-import androidx.core.app.NotificationCompat
-import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
-import org.json.JSONObject
-import java.io.File
-import java.io.IOException
-import java.util.concurrent.TimeUnit
+const app = express();
+const server = http.createServer(app);
+const PORT = Number(process.env.PORT || 3000);
+const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || '').trim();
 
-class ShareService : Service() {
-
-    private val handler = Handler(Looper.getMainLooper())
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .build()
-    private val prefs by lazy { getSharedPreferences("alzahra_settings", MODE_PRIVATE) }
-
-    private val runnable = object : Runnable {
-        override fun run() {
-            if (prefs.getBoolean("sharing_enabled", false)) {
-                poll()
-                handler.postDelayed(this, 5000)
-            } else {
-                stopSelf()
-            }
-        }
-    }
-
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        if (Build.VERSION.SDK_INT >= 26) {
-            val channel = NotificationChannel("share", "Share", NotificationManager.IMPORTANCE_LOW)
-            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        }
-    }
-
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val notification = NotificationCompat.Builder(this, "share")
-            .setContentTitle("اشتراک‌گذاری")
-            .setContentText("فعال")
-            .setSmallIcon(android.R.drawable.stat_sys_upload)
-            .setOngoing(true)
-            .build()
-        startForeground(1010, notification)
-        handler.removeCallbacks(runnable)
-        handler.post(runnable)
-        return START_STICKY
-    }
-
-    override fun onDestroy() {
-        handler.removeCallbacks(runnable)
-        super.onDestroy()
-    }
-
-    private fun base(): String {
-        return prefs.getString("server_url", "")?.trimEnd('/') ?: ""
-    }
-
-    private fun poll() {
-        val b = base()
-        if (b.isEmpty()) return
-
-        val request = Request.Builder()
-            .url("$b/api/phone/commands")
-            .header("Authorization", "Bearer ${prefs.getString("device_token", "")}")
-            .get()
-            .build()
-
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {}
-            override fun onResponse(call: Call, response: Response) {
-                val body = response.body?.string() ?: return
-                try {
-                    val arr = JSONArray(body)
-                    for (i in 0 until arr.length()) {
-                        val cmd = arr.getJSONObject(i)
-                        when (cmd.optString("type")) {
-                            "list" -> sendList(cmd.getString("id"))
-                            "transfer" -> sendFile(cmd)
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        })
-    }
-
-    private fun scan(): JSONArray {
-        val out = JSONArray()
-        val root = Environment.getExternalStorageDirectory()
-        var count = 0
-
-        // پوشه‌هایی که اسکن می‌شوند
-        val allowed = setOf(
-            "download", "downloads",
-            "documents", "document",
-            "dcim",
-            "pictures", "picture",
-            "screenshot", "screenshots",
-            "movies", "movie"
-        )
-
-        // فقط واتساپ و پوشه‌های سیستمی رد شوند
-        val blocked = setOf(
-            "whatsapp", "android", "obb", "data"
-        )
-
-        fun walk(dir: File, isRoot: Boolean = false) {
-            if (count >= 1500) return
-            val files = dir.listFiles() ?: return
-
-            for (f in files) {
-                if (count >= 1500) break
-
-                val nameLower = f.name.lowercase()
-
-                // رد کردن پوشه‌های ممنوع و مخفی
-                if (f.name.startsWith(".") || blocked.any { nameLower.contains(it) }) continue
-
-                if (f.isDirectory) {
-                    if (isRoot) {
-                        // در ریشه فقط پوشه‌های مجاز
-                        if (allowed.any { nameLower.contains(it) }) {
-                            walk(f, false)
-                        }
-                    } else {
-                        walk(f, false)
-                    }
-                } else if (f.isFile && f.canRead()) {
-                    try {
-                        out.put(
-                            JSONObject()
-                                .put("path", f.absolutePath)
-                                .put("name", f.name)
-                                .put("size", f.length())
-                                .put("modified", f.lastModified())
-                        )
-                        count++
-                    } catch (_: Exception) {}
-                }
-            }
-        }
-
-        walk(root, true)
-        return out
-    }
-
-    private fun sendList(id: String) {
-        val json = JSONObject().put("files", scan())
-        val body = json.toString().toRequestBody("application/json".toMediaType())
-        val request = Request.Builder()
-            .url("${base()}/api/phone/commands/$id/result")
-            .header("Authorization", "Bearer ${prefs.getString("device_token", "")}")
-            .post(body)
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {}
-            override fun onResponse(call: Call, response: Response) {
-                response.close()
-            }
-        })
-    }
-
-    private fun sendFile(cmd: JSONObject) {
-        try {
-            val f = File(cmd.getString("path"))
-            if (!f.exists() || !f.canRead()) return
-
-            val body = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart("file", f.name, f.asRequestBody("application/octet-stream".toMediaType()))
-                .build()
-
-            val request = Request.Builder()
-                .url("${base()}/api/phone/transfers/${cmd.getString("id")}/file")
-                .header("Authorization", "Bearer ${prefs.getString("device_token", "")}")
-                .post(body)
-                .build()
-
-            client.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {}
-                override fun onResponse(call: Call, response: Response) {
-                    response.close()
-                }
-            })
-        } catch (_: Exception) {}
-    }
+if (ADMIN_PASSWORD.length < 20) {
+  console.error(`ADMIN_PASSWORD is missing or too short. Received length: ${ADMIN_PASSWORD.length}`);
+  process.exit(1);
 }
+
+app.disable('x-powered-by');
+app.use(express.json({ limit: '5mb' }));
+
+const dataDir = path.join(__dirname, 'data');
+const uploadsDir = path.join(dataDir, 'uploads');
+const stateFile = path.join(dataDir, 'state.json');
+fs.mkdirSync(uploadsDir, { recursive: true });
+
+const devices = new Map();
+const commands = new Map();
+const transfers = new Map();
+
+const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } });
+const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
+
+function safeEqual(a, b) {
+  const x = Buffer.from(hash(a));
+  const y = Buffer.from(hash(b));
+  return crypto.timingSafeEqual(x, y);
+}
+
+// ---------- مدیریت حافظه و ذخیره ----------
+let saveTimer = null;
+let dirty = false;
+
+function markDirty() {
+  dirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    if (dirty) {
+      dirty = false;
+      saveStateNow();
+    }
+  }, 1500);
+}
+
+function saveStateNow() {
+  try {
+    const state = {
+      devices: [...devices.values()],
+      commands: [...commands.values()].slice(-200),
+      transfers: [...transfers.values()].slice(-300).map(({ savedPath, ...t }) => ({ ...t, savedPath }))
+    };
+    const tmp = `${stateFile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, stateFile);
+  } catch (e) {
+    console.error('saveState failed:', e.message);
+  }
+}
+
+function loadState() {
+  if (!fs.existsSync(stateFile)) return;
+  try {
+    const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
+    for (const d of s.devices || []) devices.set(d.deviceId, d);
+    for (const c of s.commands || []) commands.set(c.id, c);
+    for (const t of s.transfers || []) transfers.set(t.id, t);
+    console.log(`Loaded ${devices.size} devices, ${commands.size} commands, ${transfers.size} transfers`);
+  } catch (e) {
+    console.error('Could not load state:', e.message);
+  }
+}
+loadState();
+
+// پاک‌سازی دوره‌ای حافظه (هر ۱۰ دقیقه)
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 24 * 60 * 60 * 1000;
+
+  for (const [id, c] of commands) {
+    if (c.status !== 'pending' && c.status !== 'delivered' && (now - (c.createdAt || 0)) > maxAge) {
+      commands.delete(id);
+    }
+  }
+  for (const [id, t] of transfers) {
+    if (t.status === 'complete' || t.status === 'cancelled') {
+      if ((now - (t.completedAt || t.cancelledAt || t.createdAt || 0)) > maxAge) {
+        transfers.delete(id);
+      }
+    }
+  }
+  markDirty();
+  console.log(`Memory cleanup: devices=${devices.size}, commands=${commands.size}, transfers=${transfers.size}`);
+}, 10 * 60 * 1000);
+
+// ---------- middleware ----------
+function admin(req, res, next) {
+  const token = (req.headers.authorization || '').replace(/^Bearer /, '');
+  if (!safeEqual(token, ADMIN_PASSWORD)) return res.status(401).json({ error: 'unauthorized' });
+  next();
+}
+
+function phone(req, res, next) {
+  const token = (req.headers.authorization || '').replace(/^Bearer /, '');
+  const tokenHash = hash(token);
+  const device = [...devices.values()].find(d => d.tokenHash === tokenHash && d.approved && !d.revoked);
+  if (!device) return res.status(401).json({ error: 'device_not_approved_or_revoked' });
+  req.device = device;
+  next();
+}
+
+function createCommand(deviceId, type, extra = {}) {
+  const id = crypto.randomBytes(12).toString('hex');
+  const command = { id, deviceId, type, ...extra, status: 'pending', createdAt: Date.now() };
+  commands.set(id, command);
+  markDirty();
+  return command;
+}
+
+// ---------- routes ----------
+app.use(express.static(path.join(__dirname, 'public')));
+app.get('/health', (_req, res) => res.json({ ok: true, memory: process.memoryUsage() }));
+
+app.post('/api/admin/login', (req, res) => {
+  try {
+    if (!safeEqual(req.body?.password || '', ADMIN_PASSWORD)) return res.status(401).json({ error: 'unauthorized' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/admin/devices', admin, (_req, res) => {
+  try {
+    res.json([...devices.values()].map(({ tokenHash, ...device }) => device));
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/devices/:id/approve', admin, (req, res) => {
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || device.revoked) return res.status(404).json({ error: 'not_found' });
+    device.approved = true;
+    device.approvedAt = Date.now();
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/devices/:id/revoke', admin, (req, res) => {
+  try {
+    const device = devices.get(req.params.id);
+    if (!device) return res.status(404).json({ error: 'not_found' });
+    device.revoked = true;
+    device.tokenHash = '';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/devices/:id/scan', admin, (req, res) => {
+  console.log('>>> SCAN requested for device:', req.params.id);
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || !device.approved || device.revoked) {
+      console.log('>>> device not available');
+      return res.status(404).json({ error: 'device_not_available' });
+    }
+    const command = createCommand(req.params.id, 'list');
+    console.log('>>> command created:', command.id);
+    res.json({ commandId: command.id });
+  } catch (e) {
+    console.error('>>> SCAN ERROR:', e.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/admin/devices/:id/files', admin, (req, res) => {
+  try {
+    const device = devices.get(req.params.id);
+    if (!device) return res.status(404).json({ error: 'not_found' });
+    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/devices/:id/transfers', admin, (req, res) => {
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || !device.approved || device.revoked) {
+      return res.status(404).json({ error: 'device_not_available' });
+    }
+    const requestedPath = req.body?.path;
+    const knownFile = (device.files || []).find(file => file.path === requestedPath);
+    if (!knownFile) return res.status(400).json({ error: 'file_not_in_latest_device_listing' });
+
+    const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
+    transfers.set(command.id, {
+      id: command.id,
+      deviceId: req.params.id,
+      name: path.basename(knownFile.path),
+      path: knownFile.path,
+      status: 'queued',
+      createdAt: command.createdAt,
+      studentName: `${device.firstName || ''} ${device.lastName || ''}`.trim()
+    });
+    markDirty();
+    res.json({ transferId: command.id, status: 'queued' });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/admin/transfers/:id/cancel', admin, (req, res) => {
+  try {
+    const transfer = transfers.get(req.params.id);
+    const command = commands.get(req.params.id);
+    if (!transfer || !command || !['queued', 'delivered'].includes(transfer.status)) {
+      return res.status(409).json({ error: 'transfer_not_cancellable' });
+    }
+    transfer.status = 'cancelled';
+    transfer.cancelledAt = Date.now();
+    command.status = 'cancelled';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/admin/transfers', admin, (_req, res) => {
+  try {
+    res.json([...transfers.values()]);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/admin/transfers/:id/download', admin, (req, res) => {
+  try {
+    const transfer = transfers.get(req.params.id);
+    if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
+      return res.status(404).json({ error: 'not_ready' });
+    }
+    res.download(transfer.savedPath, transfer.name);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+// ثبت‌نام دستگاه
+app.post('/api/phone/enroll', (req, res) => {
+  try {
+    const { deviceId, firstName, lastName, major } = req.body || {};
+    if (![deviceId, firstName, lastName, major].every(v => typeof v === 'string' && v.trim().length > 0 && v.length < 160)) {
+      return res.status(400).json({ error: 'invalid_profile' });
+    }
+    if (devices.has(deviceId)) return res.status(409).json({ error: 'device_already_registered' });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const safeFolder = `${firstName.trim()}_${lastName.trim()}_${deviceId}`
+      .replace(/[^a-zA-Z0-9._\-\u0600-\u06FF]/g, '_')
+      .slice(0, 120);
+    const userDir = path.join(uploadsDir, safeFolder);
+    fs.mkdirSync(userDir, { recursive: true });
+
+    devices.set(deviceId, {
+      deviceId,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      major: major.trim(),
+      tokenHash: hash(token),
+      approved: true,
+      revoked: false,
+      pairedAt: Date.now(),
+      lastSeen: Date.now(),
+      files: [],
+      uploadFolder: safeFolder
+    });
+    markDirty();
+    res.json({ deviceId, token, approvalRequired: false });
+  } catch (e) {
+    console.error('enroll error:', e.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.get('/api/phone/commands', phone, (req, res) => {
+  try {
+    req.device.lastSeen = Date.now();
+    const pending = [...commands.values()].filter(c => c.deviceId === req.device.deviceId && c.status === 'pending');
+    for (const command of pending) command.status = 'delivered';
+    if (pending.length) markDirty();
+    res.json(pending);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
+app.post('/api/phone/commands/:id/result', phone, (req, res) => {
+  try {
+    const command = commands.get(req.params.id);
+    if (!command || 
