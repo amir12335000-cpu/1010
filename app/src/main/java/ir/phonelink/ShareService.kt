@@ -37,10 +37,10 @@ class ShareService : Service() {
     private val CHANNEL_ID = "alzahra_share"
     private val NOTIF_ID = 1010
 
-    private val poll = object : Runnable {
+    private val pollRunnable = object : Runnable {
         override fun run() {
             if (prefs.getBoolean("sharing_enabled", false)) {
-                pollCommands()
+                doPoll()
                 handler.postDelayed(this, 5000)
             } else {
                 stopSelf()
@@ -48,11 +48,13 @@ class ShareService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
+    }
 
     override fun onCreate() {
         super.onCreate()
-        createChannel()
+        createNotificationChannel()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -68,38 +70,22 @@ class ShareService : Service() {
 
         startForeground(NOTIF_ID, notification)
 
-        handler.removeCallbacks(poll)
-        handler.post(poll)
+        handler.removeCallbacks(pollRunnable)
+        handler.post(pollRunnable)
         return START_STICKY
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(poll)
+        handler.removeCallbacks(pollRunnable)
         http.dispatcher.cancelAll()
         super.onDestroy()
     }
 
-    private fun createChannel() {
+    private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "اشتراک‌گذاری",
                 NotificationManager.IMPORTANCE_LOW
-            ).apply {
-                description = "سرویس انتقال فایل"
-                setShowBadge(false)
-                enableLights(false)
-                enableVibration(false)
-                setSound(null, null)
-            }
-            getSystemService(NotificationManager::class.java)
-                .createNotificationChannel(channel)
-        }
-    }
-
-    private fun base(): String {
-        return (prefs.getString("server_url", "") ?: "").trimEnd('/')
-    }
-
-    private fun auth(url: String, body: JSONObject? = null): Request {
-        val builder = 
+            )
+            channel.description = "سرویس انتقال فایل"
