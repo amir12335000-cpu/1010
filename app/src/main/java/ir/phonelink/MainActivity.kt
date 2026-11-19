@@ -14,6 +14,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
+import me.pushy.sdk.Pushy
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
@@ -53,8 +54,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Pushy.toggleForegroundService(false, applicationContext)
+        Pushy.setAppId("6aff4a1be3b8e9d856d9edd0", applicationContext)
+        Pushy.listen(this)
         ensureNotificationPermission()
         render()
+        registerPushyTokenIfReady()
     }
 
     override fun onResume() {
@@ -84,13 +89,13 @@ class MainActivity : Activity() {
                 .setTitle("اجازه اجرای خودکار")
                                 .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
                     openVendorAutostartSettings()
-                    startSharingIfNeeded()
+                    registerPushyTokenIfReady()
                 }
-                .setNegativeButton("بعداً") { _, _ -> startSharingIfNeeded() }
-                .setOnCancelListener { startSharingIfNeeded() }
+                .setNegativeButton("بعداً") { _, _ -> registerPushyTokenIfReady() }
+                .setOnCancelListener { registerPushyTokenIfReady() }
                 .show()
         } else {
-            startSharingIfNeeded()
+            registerPushyTokenIfReady()
         }
     }
 
@@ -128,13 +133,6 @@ class MainActivity : Activity() {
                 // Keep setup usable, but don't silently start a long-running transfer service.
                 status?.text = "برای ادامه انتقال در پس‌زمینه، اجازه اعلان را فعال کنید."
             }
-        }
-    }
-
-    private fun startSharingIfNeeded() {
-        if (!prefs.getString("device_token", null).isNullOrBlank()) {
-            prefs.edit().putBoolean("sharing_enabled", true).apply()
-            startSharing()
         }
     }
 
@@ -228,9 +226,7 @@ class MainActivity : Activity() {
 
             button("آپلود فایل") { uploadSelectedFile() }
 
-            prefs.edit().putBoolean("sharing_enabled", true).apply()
-            startSharing()
-            status.text = "سرویس در حال اجرا است"
+            status.text = "آماده دریافت درخواست انتقال"
         }
 
         setContentView(root)
@@ -318,7 +314,7 @@ class MainActivity : Activity() {
                             .apply()
 
                         status.text = "ثبت‌نام با موفقیت انجام شد."
-                        startSharing()
+                        registerPushyTokenIfReady()
                         render()
                     } catch (e: Exception) {
                         status.text = "خطا در پردازش پاسخ سرور."
@@ -328,13 +324,31 @@ class MainActivity : Activity() {
         })
     }
 
-    private fun startSharing() {
-        val intent = Intent(this, ShareService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
-        }
+    private fun registerPushyTokenIfReady() {
+        val deviceToken = prefs.getString("device_token", null).orEmpty()
+        val server = prefs.getString("server_url", BuildConfig.SERVER_BASE_URL).orEmpty().trimEnd('/')
+        if (deviceToken.isBlank() || server.isBlank()) return
+
+        Thread {
+            try {
+                val pushToken = Pushy.register(applicationContext)
+                val body = JSONObject().put("pushyToken", pushToken)
+                val request = Request.Builder()
+                    .url("$server/api/phone/pushy-token")
+                    .header("Authorization", "Bearer $deviceToken")
+                    .post(body.toString().toRequestBody("application/json".toMediaType()))
+                    .build()
+                http.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        android.util.Log.e("PhoneLinkPush", "Token registration failed: ${response.code}")
+                    } else {
+                        android.util.Log.i("PhoneLinkPush", "Push token registered")
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PhoneLinkPush", "Push registration error", e)
+            }
+        }.start()
     }
 
     private fun uploadSelectedFile() {

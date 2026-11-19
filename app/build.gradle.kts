@@ -62,4 +62,5 @@ android {
 dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("androidx.core:core:1.15.0")
+    implementation("me.pushy:sdk:1.0.129")
 }

@@ -480,7 +480,7 @@ function renderFiles(id, el, j) {
       } catch (e) { alert('خطا: ' + e.message); }
     };
     actions.append(btn);
-    if (/\\.(jpe?g|png|gif|webp|bmp)$/i.test(name)) {
+    if (/\.(jpe?g|png|gif|webp|bmp)$/i.test(name)) {
       const preview = document.createElement('button');
       preview.className = 'secondary';
       preview.textContent = 'پیش‌نمایش';

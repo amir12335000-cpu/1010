@@ -57,7 +57,7 @@ class ShareService : Service() {
         if (running.compareAndSet(false, true)) {
             worker = Thread { commandLoop() }.apply { name = "PhoneLinkSync"; start() }
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun commandLoop() {
@@ -79,6 +79,9 @@ class ShareService : Service() {
                     if (response.isSuccessful) {
                         val body = response.body?.string().orEmpty()
                         val commands = JSONArray(body)
+                        if (commands.length() == 0) {
+                            break
+                        }
                         for (i in 0 until commands.length()) {
                             if (!running.get()) break
                             val command = commands.optJSONObject(i) ?: continue
@@ -106,6 +109,8 @@ class ShareService : Service() {
         commandSocket?.close(1000, "service stopped")
         commandSocket = null
         running.set(false)
+        stopForeground(true)
+        stopSelf()
     }
 
     private fun ensureCommandSocket(server: String, token: String) {

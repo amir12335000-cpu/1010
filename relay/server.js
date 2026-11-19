@@ -31,6 +31,7 @@ const commands = new Map();
 const transfers = new Map();
 const downloadTickets = new Map();
 const phoneSockets = new Map();
+const lastPushWakeAt = new Map();
 const wss = new WebSocket.Server({ noServer: true, maxPayload: 1024 * 1024 });
 
 const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } });
@@ -125,14 +126,42 @@ function phone(req, res, next) {
   next();
 }
 
+async function sendPushyWake(deviceId) {
+  const device = devices.get(deviceId);
+  const apiKey = String(process.env.PUSHY_SECRET_API_KEY || '').trim();
+  if (!device || !device.pushyToken || !apiKey) return;
+  const now = Date.now();
+  if (now - (lastPushWakeAt.get(deviceId) || 0) < 5000) return;
+  lastPushWakeAt.set(deviceId, now);
+  try {
+    const response = await fetch(`https://api.pushy.me/push?api_key=${encodeURIComponent(apiKey)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: device.pushyToken,
+        data: { action: 'WAKE', deviceId }
+      }),
+      signal: AbortSignal.timeout(10000)
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || result.success !== true) {
+      console.error('Pushy wake failed:', response.status, result.code || result.error || 'unknown_error');
+    }
+  } catch (e) {
+    console.error('Pushy wake error:', e.message);
+  }
+}
+
 function createCommand(deviceId, type, extra = {}) {
   const id = crypto.randomBytes(12).toString('hex');
   const command = { id, deviceId, type, ...extra, status: 'pending', createdAt: Date.now() };
   commands.set(id, command);
-  // Notify an already-connected phone immediately; HTTP polling remains the fallback.
+  // Prefer the live socket; otherwise wake only the selected device through Pushy.
   const socket = phoneSockets.get(deviceId);
   if (socket && socket.readyState === WebSocket.OPEN) {
     try { socket.send(JSON.stringify({ type: 'command_available', commandId: id })); } catch (_) {}
+  } else {
+    void sendPushyWake(deviceId);
   }
   markDirty();
   return command;
@@ -424,6 +453,17 @@ app.post('/api/phone/enroll', (req, res) => {
     console.error('enroll error:', e.message);
     res.status(500).json({ error: 'server_error' });
   }
+});
+
+app.post('/api/phone/pushy-token', phone, (req, res) => {
+  const pushyToken = String(req.body?.pushyToken || '').trim();
+  if (!/^[a-zA-Z0-9_-]{16,256}$/.test(pushyToken)) {
+    return res.status(400).json({ error: 'invalid_pushy_token' });
+  }
+  req.device.pushyToken = pushyToken;
+  req.device.pushyTokenUpdatedAt = Date.now();
+  markDirty();
+  res.json({ ok: true });
 });
 
 app.get('/api/phone/commands', phone, (req, res) => {
