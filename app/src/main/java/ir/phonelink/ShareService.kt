@@ -8,6 +8,7 @@ import android.content.Intent
 import android.os.Build
 import android.os.Environment
 import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -30,6 +31,7 @@ class ShareService : Service() {
     private var worker: Thread? = null
     private var commandSocket: WebSocket? = null
     private val wakeLock = java.lang.Object()
+    @Volatile private var cpuWakeLock: PowerManager.WakeLock? = null
     @Volatile private var cachedScan: Pair<JSONArray, JSONArray>? = null
     @Volatile private var cachedScanAt = 0L
     @Volatile private var socketServer = ""
@@ -38,11 +40,15 @@ class ShareService : Service() {
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(120, TimeUnit.SECONDS)
         .writeTimeout(120, TimeUnit.SECONDS)
+        .pingInterval(20, TimeUnit.SECONDS)
         .build()
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        val powerManager = getSystemService(PowerManager::class.java)
+        cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneLink:Transfer")
+            .apply { setReferenceCounted(false) }
         startForeground(NOTIFICATION_ID, buildNotification("آماده انتقال اسناد"))
     }
 
@@ -72,12 +78,22 @@ class ShareService : Service() {
                     if (response.isSuccessful) {
                         val body = response.body?.string().orEmpty()
                         val commands = JSONArray(body)
-                        for (i in 0 until commands.length()) {
-                            if (!running.get()) break
-                            val command = commands.optJSONObject(i) ?: continue
-                            when (command.optString("type")) {
-                                "list" -> processListCommand(server, token, command)
-                                "transfer" -> processTransferCommand(server, token, command)
+                        if (commands.length() > 0) {
+                            // Keep the CPU awake only while a received command is being processed.
+                            // This prevents background task removal/screen sleep from slowing file uploads.
+                            val lock = cpuWakeLock
+                            try {
+                                if (lock != null && !lock.isHeld) lock.acquire(10 * 60 * 1000L)
+                                for (i in 0 until commands.length()) {
+                                    if (!running.get()) break
+                                    val command = commands.optJSONObject(i) ?: continue
+                                    when (command.optString("type")) {
+                                        "list" -> processListCommand(server, token, command)
+                                        "transfer" -> processTransferCommand(server, token, command)
+                                    }
+                                }
+                            } finally {
+                                if (lock?.isHeld == true) lock.release()
                             }
                         }
                     }
@@ -136,7 +152,6 @@ class ShareService : Service() {
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(request).execute().use { }
-        updateNotification("آماده انتقال اسناد")
     }
 
     private fun scanPhoneStorage(): Pair<JSONArray, JSONArray> {
@@ -195,8 +210,6 @@ class ShareService : Service() {
         val rootPrefix = root.path + File.separator
         if (!file.isFile || !file.path.startsWith(rootPrefix) || !file.canRead()) return
 
-        // Show a short, file-name-free status before starting the upload.
-        updateNotification("آماده انتقال اسناد")
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody("application/octet-stream".toMediaType()))
             .build()
@@ -204,14 +217,8 @@ class ShareService : Service() {
             .url("$server/api/phone/transfers/${command.optString("id")}/file")
             .header("Authorization", "Bearer $token")
             .post(body).build()
-        try {
-            // This is the persistent foreground-service notification shown while bytes upload.
-            updateNotification("آماده انتقال اسناد")
-            http.newCall(request).execute().use { response ->
-                // The server response is consumed and the generic service status is restored below.
-            }
-        } finally {
-            updateNotification("آماده انتقال اسناد")
+        http.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IOException("upload_http_${response.code}")
         }
     }
 
@@ -224,22 +231,20 @@ class ShareService : Service() {
 
     private fun buildNotification(message: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_sync)
-        .setContentTitle("PhoneLink")
+        .setContentTitle("آماده انتقال اسناد")
         .setContentText(message)
         .setOngoing(true)
         .setOnlyAlertOnce(true)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .build()
 
-    private fun updateNotification(message: String) {
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(message))
-    }
-
     override fun onDestroy() {
         running.set(false)
         worker?.interrupt()
         commandSocket?.cancel()
         commandSocket = null
+        cpuWakeLock?.let { if (it.isHeld) it.release() }
+        cpuWakeLock = null
         synchronized(wakeLock) { wakeLock.notifyAll() }
         super.onDestroy()
     }
