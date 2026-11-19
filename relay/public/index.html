@@ -255,7 +255,7 @@ function currentDeviceElement(id, fallback) {
 }
 
 async function waitForFileList(id, el, previousUpdatedAt) {
-  const deadline = Date.now() + 25000;
+  const deadline = Date.now() + 90000;
   let latest = fileListCache.get(id) || null;
   while (Date.now() < deadline) {
     latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
@@ -312,6 +312,19 @@ function renderFiles(id, el, j) {
   const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
   close.onclick = () => { openFileDevices.delete(id); fileListCache.delete(id); wrap.remove(); };
   toolbar.append(count, close); wrap.append(toolbar);
+  if (j.folderStats && typeof j.folderStats === 'object') {
+    const diagnostics = document.createElement('div');
+    diagnostics.className = 'muted';
+    diagnostics.style.margin = '8px 0';
+    diagnostics.textContent = Object.entries(j.folderStats).map(([folder, info]) => {
+      const state = info && info.state === 'scanned' ? 'اسکن شد' :
+        (info && info.state === 'missing' ? 'پیدا نشد' :
+        (info && info.state === 'unreadable' ? 'دسترسی خواندن ندارد' :
+        (info && info.state === 'not_directory' ? 'پوشه نیست' : 'نامشخص')));
+      return `${folder}: ${state} (${Number(info && info.files || 0)} فایل)`;
+    }).join(' | ');
+    wrap.append(diagnostics);
+  }
   const selected = selectedFilePaths.get(id) || new Set();
   selectedFilePaths.set(id, selected);
   const batchBar = document.createElement('div'); batchBar.className = 'batch-actions';

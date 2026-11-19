@@ -16,7 +16,7 @@ if (ADMIN_PASSWORD.length < 20) {
 }
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '25mb' }));
 
 // Persistent storage: set DATA_DIR=/app/data in Gerdoo Cloud.
 const configuredDataDir = String(process.env.DATA_DIR || '').trim();
@@ -198,7 +198,7 @@ app.get('/api/admin/devices/:id/files', admin, (req, res) => {
   try {
     const device = devices.get(req.params.id);
     if (!device) return res.status(404).json({ error: 'not_found' });
-    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
+    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null, folderStats: device.folderStats || {} });
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -350,7 +350,12 @@ app.post('/api/phone/commands/:id/result', phone, (req, res) => {
     if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
       return res.status(404).json({ error: 'not_found' });
     }
-    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 20000);
+    if (!Array.isArray(req.body.files)) {
+      return res.status(400).json({ error: 'invalid_file_list' });
+    }
+    req.device.files = req.body.files.slice(0, 20000);
+    req.device.folderStats = (req.body.folderStats && typeof req.body.folderStats === 'object')
+      ? req.body.folderStats : {};
     req.device.filesUpdatedAt = Date.now();
     command.status = 'complete';
     markDirty();

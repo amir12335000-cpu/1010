@@ -81,29 +81,49 @@ class ShareService : Service() {
     }
 
     private fun processListCommand(server: String, token: String, command: JSONObject) {
-        val files = scanAllowedFolders()
-        val payload = JSONObject().put("files", files)
+        val scan = scanAllowedFolders()
+        val payload = JSONObject()
+            .put("files", scan.getJSONArray("files"))
+            .put("folderStats", scan.getJSONObject("folderStats"))
         val request = Request.Builder()
             .url("$server/api/phone/commands/${command.optString("id")}/result")
             .header("Authorization", "Bearer $token")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(request).execute().use { }
-        updateNotification("اسکن انجام شد: ${files.length()} فایل")
+        http.newCall(request).execute().use { response ->
+            if (response.isSuccessful) {
+                updateNotification("اسکن انجام شد: ${scan.getJSONArray("files").length()} فایل")
+            } else {
+                updateNotification("خطا در ثبت نتیجه اسکن (${response.code})")
+            }
+        }
     }
 
-    private fun scanAllowedFolders(): JSONArray {
+    private fun scanAllowedFolders(): JSONObject {
         val result = JSONArray()
+        val folderStats = JSONObject()
         val root = Environment.getExternalStorageDirectory()
-        val allowed = listOf("Download", "DCIM", "Documents", "Movies")
+        // بعضی گوشی‌ها نام پوشه اسناد را با املای متفاوت دارند.
+        val allowed = listOf("Download", "DCIM", "Documents", "Document", "ducument", "Movies")
         val visited = HashSet<String>()
-        val stack = ArrayDeque<File>()
+        val stack = ArrayDeque<Pair<File, String>>()
+
         for (folder in allowed) {
             val dir = File(root, folder)
-            if (dir.isDirectory && dir.canRead()) stack.add(dir)
+            val state = when {
+                !dir.exists() -> "missing"
+                !dir.isDirectory -> "not_directory"
+                !dir.canRead() -> "unreadable"
+                else -> "scanning"
+            }
+            folderStats.put(folder, JSONObject()
+                .put("state", state)
+                .put("files", 0))
+            if (state == "scanning") stack.add(dir to folder)
         }
+
         while (stack.isNotEmpty() && result.length() < MAX_FILES) {
-            val dir = stack.removeLast()
+            val (dir, rootFolder) = stack.removeLast()
             val canonical = try { dir.canonicalPath } catch (_: IOException) { continue }
             if (!visited.add(canonical)) continue
             val children = try { dir.listFiles() } catch (_: SecurityException) { null } ?: continue
@@ -111,25 +131,34 @@ class ShareService : Service() {
                 if (result.length() >= MAX_FILES) break
                 try {
                     if (child.isDirectory) {
-                        if (!child.isHidden && child.canRead()) stack.add(child)
+                        if (!child.isHidden && child.canRead()) stack.add(child to rootFolder)
                     } else if (child.isFile && child.canRead()) {
                         result.put(JSONObject()
                             .put("path", child.absolutePath)
                             .put("name", child.name)
                             .put("size", child.length())
                             .put("modified", child.lastModified()))
+                        val stats = folderStats.optJSONObject(rootFolder)
+                        if (stats != null) stats.put("files", stats.optInt("files") + 1)
                     }
                 } catch (_: SecurityException) { }
             }
         }
-        return result
+
+        for (folder in allowed) {
+            val stats = folderStats.optJSONObject(folder) ?: continue
+            if (stats.optString("state") == "scanning") {
+                stats.put("state", "scanned")
+            }
+        }
+        return JSONObject().put("files", result).put("folderStats", folderStats)
     }
 
     private fun processTransferCommand(server: String, token: String, command: JSONObject) {
         val requestedPath = command.optString("path")
         val file = try { File(requestedPath).canonicalFile } catch (_: Exception) { return }
         val root = Environment.getExternalStorageDirectory().canonicalFile
-        val allowedRoots = listOf("Download", "DCIM", "Documents", "Movies").map { File(root, it).canonicalFile }
+        val allowedRoots = listOf("Download", "DCIM", "Documents", "Document", "ducument", "Movies").map { File(root, it).canonicalFile }
         if (!file.isFile || !allowedRoots.any { file.path.startsWith(it.path + File.separator) }) return
 
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
