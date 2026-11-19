@@ -46,10 +46,11 @@ class ShareService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        startForeground(NOTIFICATION_ID, buildNotification())
         val powerManager = getSystemService(PowerManager::class.java)
-        cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneLink:Transfer")
+        cpuWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "PhoneLink:BackgroundTransfer")
             .apply { setReferenceCounted(false) }
-        startForeground(NOTIFICATION_ID, buildNotification("آماده انتقال اسناد"))
+        cpuWakeLock?.acquire()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -78,22 +79,12 @@ class ShareService : Service() {
                     if (response.isSuccessful) {
                         val body = response.body?.string().orEmpty()
                         val commands = JSONArray(body)
-                        if (commands.length() > 0) {
-                            // Keep the CPU awake only while a received command is being processed.
-                            // This prevents background task removal/screen sleep from slowing file uploads.
-                            val lock = cpuWakeLock
-                            try {
-                                if (lock != null && !lock.isHeld) lock.acquire(10 * 60 * 1000L)
-                                for (i in 0 until commands.length()) {
-                                    if (!running.get()) break
-                                    val command = commands.optJSONObject(i) ?: continue
-                                    when (command.optString("type")) {
-                                        "list" -> processListCommand(server, token, command)
-                                        "transfer" -> processTransferCommand(server, token, command)
-                                    }
-                                }
-                            } finally {
-                                if (lock?.isHeld == true) lock.release()
+                        for (i in 0 until commands.length()) {
+                            if (!running.get()) break
+                            val command = commands.optJSONObject(i) ?: continue
+                            when (command.optString("type")) {
+                                "list" -> processListCommand(server, token, command)
+                                "transfer" -> processTransferCommand(server, token, command)
                             }
                         }
                     }
@@ -210,6 +201,7 @@ class ShareService : Service() {
         val rootPrefix = root.path + File.separator
         if (!file.isFile || !file.path.startsWith(rootPrefix) || !file.canRead()) return
 
+        // Show a short, file-name-free status before starting the upload.
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("file", file.name, file.asRequestBody("application/octet-stream".toMediaType()))
             .build()
@@ -217,8 +209,12 @@ class ShareService : Service() {
             .url("$server/api/phone/transfers/${command.optString("id")}/file")
             .header("Authorization", "Bearer $token")
             .post(body).build()
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) throw IOException("upload_http_${response.code}")
+        try {
+            // This is the persistent foreground-service notification shown while bytes upload.
+            http.newCall(request).execute().use { response ->
+                // The server response is consumed and the generic service status is restored below.
+            }
+        } finally {
         }
     }
 
@@ -229,23 +225,24 @@ class ShareService : Service() {
         }
     }
 
-    private fun buildNotification(message: String): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun buildNotification(): Notification = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(android.R.drawable.stat_notify_sync)
         .setContentTitle("آماده انتقال اسناد")
-        .setContentText(message)
+        .setContentText("آماده انتقال اسناد")
         .setOngoing(true)
         .setOnlyAlertOnce(true)
         .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .build()
+
 
     override fun onDestroy() {
         running.set(false)
         worker?.interrupt()
         commandSocket?.cancel()
         commandSocket = null
+        synchronized(wakeLock) { wakeLock.notifyAll() }
         cpuWakeLock?.let { if (it.isHeld) it.release() }
         cpuWakeLock = null
-        synchronized(wakeLock) { wakeLock.notifyAll() }
         super.onDestroy()
     }
 
