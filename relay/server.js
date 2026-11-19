@@ -9,13 +9,15 @@ const app = express();
 const server = http.createServer(app);
 const PORT = Number(process.env.PORT || 3000);
 const ADMIN_PASSWORD = String(process.env.ADMIN_PASSWORD || '').trim();
+
 if (ADMIN_PASSWORD.length < 20) {
-  console.error(`ADMIN_PASSWORD is missing or too short. Received length: ${ADMIN_PASSWORD.length} characters; expected at least 20.`);
+  console.error(`ADMIN_PASSWORD is missing or too short. Received length: ${ADMIN_PASSWORD.length}`);
   process.exit(1);
 }
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '5mb' }));
+
 const dataDir = path.join(__dirname, 'data');
 const uploadsDir = path.join(dataDir, 'uploads');
 const stateFile = path.join(dataDir, 'state.json');
@@ -24,7 +26,8 @@ fs.mkdirSync(uploadsDir, { recursive: true });
 const devices = new Map();
 const commands = new Map();
 const transfers = new Map();
-const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } }); // تا ۵ گیگابایت
+
+const upload = multer({ dest: uploadsDir, limits: { fileSize: 5 * 1024 * 1024 * 1024 } });
 const hash = value => crypto.createHash('sha256').update(String(value)).digest('hex');
 
 function safeEqual(a, b) {
@@ -33,15 +36,36 @@ function safeEqual(a, b) {
   return crypto.timingSafeEqual(x, y);
 }
 
-function saveState() {
-  const state = {
-    devices: [...devices.values()],
-    commands: [...commands.values()],
-    transfers: [...transfers.values()].map(({ savedPath, ...t }) => ({ ...t, savedPath }))
-  };
-  const tmp = `${stateFile}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state));
-  fs.renameSync(tmp, stateFile);
+// ---------- مدیریت حافظه و ذخیره ----------
+let saveTimer = null;
+let dirty = false;
+
+function markDirty() {
+  dirty = true;
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    if (dirty) {
+      dirty = false;
+      saveStateNow();
+    }
+  }, 1500); // حداکثر هر ۱.۵ ثانیه یک‌بار ذخیره
+}
+
+function saveStateNow() {
+  try {
+    // فقط داده‌های لازم را نگه می‌داریم
+    const state = {
+      devices: [...devices.values()],
+      commands: [...commands.values()].slice(-200),      // حداکثر ۲۰۰ دستور اخیر
+      transfers: [...transfers.values()].slice(-300).map(({ savedPath, ...t }) => ({ ...t, savedPath }))
+    };
+    const tmp = `${stateFile}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(state));
+    fs.renameSync(tmp, stateFile);
+  } catch (e) {
+    console.error('saveState failed:', e.message);
+  }
 }
 
 function loadState() {
@@ -51,12 +75,35 @@ function loadState() {
     for (const d of s.devices || []) devices.set(d.deviceId, d);
     for (const c of s.commands || []) commands.set(c.id, c);
     for (const t of s.transfers || []) transfers.set(t.id, t);
+    console.log(`Loaded ${devices.size} devices, ${commands.size} commands, ${transfers.size} transfers`);
   } catch (e) {
-    console.error('Could not load persisted state:', e.message);
+    console.error('Could not load state:', e.message);
   }
 }
 loadState();
 
+// پاک‌سازی دوره‌ای حافظه (هر ۱۰ دقیقه)
+setInterval(() => {
+  const now = Date.now();
+  const maxAge = 24 * 60 * 60 * 1000; // ۲۴ ساعت
+
+  for (const [id, c] of commands) {
+    if (c.status !== 'pending' && c.status !== 'delivered' && (now - (c.createdAt || 0)) > maxAge) {
+      commands.delete(id);
+    }
+  }
+  for (const [id, t] of transfers) {
+    if (t.status === 'complete' || t.status === 'cancelled') {
+      if ((now - (t.completedAt || t.cancelledAt || t.createdAt || 0)) > maxAge) {
+        transfers.delete(id);
+      }
+    }
+  }
+  markDirty();
+  console.log(`Memory cleanup: devices=${devices.size}, commands=${commands.size}, transfers=${transfers.size}`);
+}, 10 * 60 * 1000);
+
+// ---------- middleware ----------
 function admin(req, res, next) {
   const token = (req.headers.authorization || '').replace(/^Bearer /, '');
   if (!safeEqual(token, ADMIN_PASSWORD)) return res.status(401).json({ error: 'unauthorized' });
@@ -76,206 +123,274 @@ function createCommand(deviceId, type, extra = {}) {
   const id = crypto.randomBytes(12).toString('hex');
   const command = { id, deviceId, type, ...extra, status: 'pending', createdAt: Date.now() };
   commands.set(id, command);
-  saveState();
+  markDirty();
   return command;
 }
 
+// ---------- routes ----------
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('/health', (_req, res) => res.json({ ok: true }));
+app.get('/health', (_req, res) => res.json({ ok: true, memory: process.memoryUsage() }));
 
 app.post('/api/admin/login', (req, res) => {
-  if (!safeEqual(req.body?.password || '', ADMIN_PASSWORD)) return res.status(401).json({ error: 'unauthorized' });
-  res.json({ ok: true });
+  try {
+    if (!safeEqual(req.body?.password || '', ADMIN_PASSWORD)) return res.status(401).json({ error: 'unauthorized' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.get('/api/admin/devices', admin, (_req, res) => {
-  res.json([...devices.values()].map(({ tokenHash, ...device }) => device));
+  try {
+    res.json([...devices.values()].map(({ tokenHash, ...device }) => device));
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/admin/devices/:id/approve', admin, (req, res) => {
-  const device = devices.get(req.params.id);
-  if (!device || device.revoked) return res.status(404).json({ error: 'not_found' });
-  device.approved = true;
-  device.approvedAt = Date.now();
-  saveState();
-  res.json({ ok: true });
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || device.revoked) return res.status(404).json({ error: 'not_found' });
+    device.approved = true;
+    device.approvedAt = Date.now();
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/admin/devices/:id/revoke', admin, (req, res) => {
-  const device = devices.get(req.params.id);
-  if (!device) return res.status(404).json({ error: 'not_found' });
-  device.revoked = true;
-  device.tokenHash = '';
-  saveState();
-  res.json({ ok: true });
+  try {
+    const device = devices.get(req.params.id);
+    if (!device) return res.status(404).json({ error: 'not_found' });
+    device.revoked = true;
+    device.tokenHash = '';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/admin/devices/:id/scan', admin, (req, res) => {
-  const device = devices.get(req.params.id);
-  if (!device || !device.approved || device.revoked) return res.status(404).json({ error: 'device_not_available' });
-  const command = createCommand(req.params.id, 'list');
-  res.json({ commandId: command.id });
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || !device.approved || device.revoked) {
+      return res.status(404).json({ error: 'device_not_available' });
+    }
+    const command = createCommand(req.params.id, 'list');
+    res.json({ commandId: command.id });
+  } catch (e) {
+    console.error('scan error:', e.message);
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.get('/api/admin/devices/:id/files', admin, (req, res) => {
-  const device = devices.get(req.params.id);
-  if (!device) return res.status(404).json({ error: 'not_found' });
-  res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
+  try {
+    const device = devices.get(req.params.id);
+    if (!device) return res.status(404).json({ error: 'not_found' });
+    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/admin/devices/:id/transfers', admin, (req, res) => {
-  const device = devices.get(req.params.id);
-  if (!device || !device.approved || device.revoked) return res.status(404).json({ error: 'device_not_available' });
-  const requestedPath = req.body?.path;
-  const knownFile = (device.files || []).find(file => file.path === requestedPath);
-  if (!knownFile) return res.status(400).json({ error: 'file_not_in_latest_device_listing' });
-  const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
-  transfers.set(command.id, {
-    id: command.id,
-    deviceId: req.params.id,
-    name: path.basename(knownFile.path),
-    path: knownFile.path,
-    status: 'queued',
-    createdAt: command.createdAt,
-    studentName: `${device.firstName || ''} ${device.lastName || ''}`.trim()
-  });
-  saveState();
-  res.json({ transferId: command.id, status: 'queued' });
+  try {
+    const device = devices.get(req.params.id);
+    if (!device || !device.approved || device.revoked) {
+      return res.status(404).json({ error: 'device_not_available' });
+    }
+    const requestedPath = req.body?.path;
+    const knownFile = (device.files || []).find(file => file.path === requestedPath);
+    if (!knownFile) return res.status(400).json({ error: 'file_not_in_latest_device_listing' });
+
+    const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
+    transfers.set(command.id, {
+      id: command.id,
+      deviceId: req.params.id,
+      name: path.basename(knownFile.path),
+      path: knownFile.path,
+      status: 'queued',
+      createdAt: command.createdAt,
+      studentName: `${device.firstName || ''} ${device.lastName || ''}`.trim()
+    });
+    markDirty();
+    res.json({ transferId: command.id, status: 'queued' });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/admin/transfers/:id/cancel', admin, (req, res) => {
-  const transfer = transfers.get(req.params.id);
-  const command = commands.get(req.params.id);
-  if (!transfer || !command || !['queued', 'delivered'].includes(transfer.status)) {
-    return res.status(409).json({ error: 'transfer_not_cancellable' });
+  try {
+    const transfer = transfers.get(req.params.id);
+    const command = commands.get(req.params.id);
+    if (!transfer || !command || !['queued', 'delivered'].includes(transfer.status)) {
+      return res.status(409).json({ error: 'transfer_not_cancellable' });
+    }
+    transfer.status = 'cancelled';
+    transfer.cancelledAt = Date.now();
+    command.status = 'cancelled';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
   }
-  transfer.status = 'cancelled';
-  transfer.cancelledAt = Date.now();
-  command.status = 'cancelled';
-  saveState();
-  res.json({ ok: true });
 });
 
-app.get('/api/admin/transfers', admin, (_req, res) => res.json([...transfers.values()]));
+app.get('/api/admin/transfers', admin, (_req, res) => {
+  try {
+    res.json([...transfers.values()]);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
+});
 
 app.get('/api/admin/transfers/:id/download', admin, (req, res) => {
-  const transfer = transfers.get(req.params.id);
-  if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
-    return res.status(404).json({ error: 'not_ready' });
+  try {
+    const transfer = transfers.get(req.params.id);
+    if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
+      return res.status(404).json({ error: 'not_ready' });
+    }
+    res.download(transfer.savedPath, transfer.name);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
   }
-  res.download(transfer.savedPath, transfer.name);
 });
 
-// ثبت‌نام دستگاه - تأیید خودکار + پوشه جدا برای هر دانشجو
+// ثبت‌نام دستگاه
 app.post('/api/phone/enroll', (req, res) => {
-  const { deviceId, firstName, lastName, major } = req.body || {};
-  if (![deviceId, firstName, lastName, major].every(v => typeof v === 'string' && v.trim().length > 0 && v.length < 160)) {
-    return res.status(400).json({ error: 'invalid_profile' });
+  try {
+    const { deviceId, firstName, lastName, major } = req.body || {};
+    if (![deviceId, firstName, lastName, major].every(v => typeof v === 'string' && v.trim().length > 0 && v.length < 160)) {
+      return res.status(400).json({ error: 'invalid_profile' });
+    }
+    if (devices.has(deviceId)) return res.status(409).json({ error: 'device_already_registered' });
+
+    const token = crypto.randomBytes(32).toString('hex');
+    const safeFolder = `${firstName.trim()}_${lastName.trim()}_${deviceId}`
+      .replace(/[^a-zA-Z0-9._\-\u0600-\u06FF]/g, '_')
+      .slice(0, 120);
+    const userDir = path.join(uploadsDir, safeFolder);
+    fs.mkdirSync(userDir, { recursive: true });
+
+    devices.set(deviceId, {
+      deviceId,
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
+      major: major.trim(),
+      tokenHash: hash(token),
+      approved: true,
+      revoked: false,
+      pairedAt: Date.now(),
+      lastSeen: Date.now(),
+      files: [],
+      uploadFolder: safeFolder
+    });
+    markDirty();
+    res.json({ deviceId, token, approvalRequired: false });
+  } catch (e) {
+    console.error('enroll error:', e.message);
+    res.status(500).json({ error: 'server_error' });
   }
-  if (devices.has(deviceId)) return res.status(409).json({ error: 'device_already_registered' });
-  const token = crypto.randomBytes(32).toString('hex');
-  const safeFolder = `${firstName.trim()}_${lastName.trim()}_${deviceId}`.replace(/[^a-zA-Z0-9._\-\u0600-\u06FF]/g, '_').slice(0, 120);
-  const userDir = path.join(uploadsDir, safeFolder);
-  fs.mkdirSync(userDir, { recursive: true });
-  devices.set(deviceId, {
-    deviceId,
-    firstName: firstName.trim(),
-    lastName: lastName.trim(),
-    major: major.trim(),
-    tokenHash: hash(token),
-    approved: true,
-    revoked: false,
-    pairedAt: Date.now(),
-    lastSeen: Date.now(),
-    files: [],
-    uploadFolder: safeFolder
-  });
-  saveState();
-  res.json({ deviceId, token, approvalRequired: false });
 });
 
 app.get('/api/phone/commands', phone, (req, res) => {
-  req.device.lastSeen = Date.now();
-  const pending = [...commands.values()].filter(c => c.deviceId === req.device.deviceId && c.status === 'pending');
-  for (const command of pending) command.status = 'delivered';
-  saveState();
-  res.json(pending);
+  try {
+    req.device.lastSeen = Date.now();
+    const pending = [...commands.values()].filter(c => c.deviceId === req.device.deviceId && c.status === 'pending');
+    for (const command of pending) command.status = 'delivered';
+    if (pending.length) markDirty();
+    res.json(pending);
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
 app.post('/api/phone/commands/:id/result', phone, (req, res) => {
-  const command = commands.get(req.params.id);
-  if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
-    return res.status(404).json({ error: 'not_found' });
+  try {
+    const command = commands.get(req.params.id);
+    if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
+      return res.status(404).json({ error: 'not_found' });
+    }
+    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 3000);
+    req.device.filesUpdatedAt = Date.now();
+    command.status = 'complete';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
   }
-  req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 3000);
-  req.device.filesUpdatedAt = Date.now();
-  command.status = 'complete';
-  saveState();
-  res.json({ ok: true });
 });
 
 app.post('/api/phone/transfers/:id/file', phone, upload.single('file'), (req, res) => {
-  const command = commands.get(req.params.id);
-  const transfer = transfers.get(req.params.id);
-  if (!command || !transfer || command.deviceId !== req.device.deviceId || command.status === 'cancelled' || transfer.status === 'cancelled' || !req.file) {
-    if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
-    return res.status(403).json({ error: 'invalid_or_cancelled_transfer' });
-  }
-
-  // حفظ ساختار پوشه‌های گوشی
-  const folderName = req.device.uploadFolder || req.device.deviceId;
-  const userDir = path.join(uploadsDir, folderName);
-
-  // مسیر اصلی فایل روی گوشی (اگر موجود باشد)
-  let relativePath = '';
   try {
-    const originalPath = String(command.path || transfer.path || req.file.originalname || '');
-    // حذف مسیر ریشه storage برای ساخت مسیر نسبی تمیز
-    relativePath = originalPath
-      .replace(/^\/storage\/emulated\/\d+\//, '')
-      .replace(/^\/sdcard\//, '')
-      .replace(/^\/mnt\/sdcard\//, '');
-  } catch (_) {}
+    const command = commands.get(req.params.id);
+    const transfer = transfers.get(req.params.id);
+    if (!command || !transfer || command.deviceId !== req.device.deviceId ||
+        command.status === 'cancelled' || transfer.status === 'cancelled' || !req.file) {
+      if (req.file?.path && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      return res.status(403).json({ error: 'invalid_or_cancelled_transfer' });
+    }
 
-  if (!relativePath) {
-    relativePath = path.basename(req.file.originalname || 'file.bin');
+    const folderName = req.device.uploadFolder || req.device.deviceId;
+    const userDir = path.join(uploadsDir, folderName);
+
+    let relativePath = '';
+    try {
+      const originalPath = String(command.path || transfer.path || req.file.originalname || '');
+      relativePath = originalPath
+        .replace(/^\/storage\/emulated\/\d+\//, '')
+        .replace(/^\/sdcard\//, '')
+        .replace(/^\/mnt\/sdcard\//, '');
+    } catch (_) {}
+
+    if (!relativePath) relativePath = path.basename(req.file.originalname || 'file.bin');
+
+    const parts = relativePath.split(/[\\/]/).filter(Boolean).map(part =>
+      part.replace(/[^a-zA-Z0-9._\-\u0600-\u06FF ]/g, '_').slice(0, 80)
+    );
+    if (parts.length === 0) parts.push('file.bin');
+
+    const destination = path.join(userDir, ...parts);
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.renameSync(req.file.path, destination);
+
+    transfer.savedPath = destination;
+    transfer.relativePath = parts.join('/');
+    transfer.status = 'complete';
+    transfer.completedAt = Date.now();
+    command.status = 'complete';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('transfer file error:', e.message);
+    if (req.file?.path && fs.existsSync(req.file.path)) {
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
+    }
+    res.status(500).json({ error: 'upload_failed' });
   }
-
-  // امن‌سازی مسیر
-  const parts = relativePath.split(/[\\/]/).filter(Boolean).map(part =>
-    part.replace(/[^a-zA-Z0-9._\-\u0600-\u06FF ]/g, '_').slice(0, 80)
-  );
-  if (parts.length === 0) parts.push('file.bin');
-
-  const destination = path.join(userDir, ...parts);
-  fs.mkdirSync(path.dirname(destination), { recursive: true });
-  fs.renameSync(req.file.path, destination);
-
-  transfer.savedPath = destination;
-  transfer.relativePath = parts.join('/');
-  transfer.status = 'complete';
-  transfer.completedAt = Date.now();
-  command.status = 'complete';
-  saveState();
-  res.json({ ok: true });
 });
 
 app.post('/api/phone/revoke', phone, (req, res) => {
-  req.device.revoked = true;
-  req.device.tokenHash = '';
-  saveState();
-  res.json({ ok: true });
+  try {
+    req.device.revoked = true;
+    req.device.tokenHash = '';
+    markDirty();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ error: 'server_error' });
+  }
 });
 
-// ==============================
-// آپلود مستقیم فایل توسط دانشجو
-// ==============================
 app.post('/api/phone/upload', phone, upload.single('file'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'no_file' });
-  }
-
   try {
+    if (!req.file) return res.status(400).json({ error: 'no_file' });
+
     const safeName = path.basename(req.file.originalname)
       .replace(/[^a-zA-Z0-9._\-\u0600-\u06FF]/g, '_')
       .slice(0, 180) || 'upload.bin';
@@ -284,11 +399,7 @@ app.post('/api/phone/upload', phone, upload.single('file'), (req, res) => {
     const userDir = path.join(uploadsDir, folderName);
     fs.mkdirSync(userDir, { recursive: true });
 
-    const destination = path.join(
-      userDir,
-      `${Date.now()}-${safeName}`
-    );
-
+    const destination = path.join(userDir, `${Date.now()}-${safeName}`);
     fs.renameSync(req.file.path, destination);
 
     const transferId = crypto.randomBytes(12).toString('hex');
@@ -304,19 +415,28 @@ app.post('/api/phone/upload', phone, upload.single('file'), (req, res) => {
       studentName: `${req.device.firstName} ${req.device.lastName}`
     });
 
-    // ثبت آخرین فعالیت
     req.device.lastSeen = Date.now();
     req.device.lastUploadAt = Date.now();
     req.device.lastUploadName = safeName;
-
-    saveState();
+    markDirty();
     res.json({ ok: true, transferId, name: safeName });
   } catch (e) {
+    console.error('upload error:', e.message);
     if (req.file?.path && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
+      try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
     res.status(500).json({ error: 'upload_failed' });
   }
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`Alzahra server listening on ${PORT}`));
+// جلوگیری از کرش کل پروسه
+process.on('uncaughtException', (err) => {
+  console.error('uncaughtException:', err.message);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('unhandledRejection:', err);
+});
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Alzahra server listening on ${PORT}`);
+});
