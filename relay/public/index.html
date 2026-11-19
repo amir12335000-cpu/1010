@@ -36,6 +36,10 @@
     .file-path{direction:ltr;text-align:left;overflow-wrap:anywhere;font-size:12px;color:#42536a}
     .file-actions{display:flex;gap:6px;flex-wrap:wrap}
     .file-count{font-size:12px;color:#60728a}
+    .preview-backdrop{position:fixed;inset:0;background:rgba(10,20,35,.78);z-index:9999;display:flex;align-items:center;justify-content:center;padding:18px}
+    .preview-panel{background:#fff;border-radius:14px;max-width:min(96vw,1100px);max-height:94vh;padding:12px;display:flex;flex-direction:column;gap:8px}
+    .preview-panel img{display:block;max-width:92vw;max-height:82vh;object-fit:contain}
+    .preview-head{display:flex;justify-content:space-between;align-items:center;gap:12px}
 
     .phone-folder{border-top:1px solid #e5eaf1;padding:8px 4px}
     .phone-folder>summary{cursor:pointer;font-weight:700;color:#263b55;list-style:none}
@@ -295,6 +299,64 @@ async function showFiles(id, el) {
   } catch (e) { console.error('showFiles:', e); }
 }
 
+async function previewPhoneImage(deviceId, file, button) {
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'در حال دریافت تصویر...';
+  try {
+    const queued = await api('/api/admin/devices/' + encodeURIComponent(deviceId) + '/transfers', {
+      method: 'POST', body: JSON.stringify({ path: file.path })
+    });
+    const transferId = queued.transferId;
+    if (!transferId) throw new Error('شناسه انتقال دریافت نشد');
+    let transfer = null;
+    const deadline = Date.now() + 180000;
+    while (Date.now() < deadline) {
+      const items = await api('/api/admin/transfers');
+      transfer = items.find(x => x.id === transferId);
+      if (transfer && ['complete', 'failed', 'cancelled'].includes(transfer.status)) break;
+      button.textContent = 'در حال دریافت تصویر...';
+      await new Promise(resolve => setTimeout(resolve, 1800));
+    }
+    if (!transfer || transfer.status !== 'complete') {
+      throw new Error(transfer?.status === 'cancelled' ? 'انتقال لغو شد' : 'دریافت تصویر در زمان مجاز کامل نشد');
+    }
+    button.textContent = 'در حال آماده‌سازی پیش‌نمایش...';
+    const ticket = await api('/api/admin/transfers/' + encodeURIComponent(transferId) + '/preview-ticket', {
+      method: 'POST', body: '{}'
+    });
+    if (!ticket.ticket) throw new Error('لینک پیش‌نمایش معتبر نیست');
+    const backdrop = document.createElement('div');
+    backdrop.className = 'preview-backdrop';
+    const panel = document.createElement('div');
+    panel.className = 'preview-panel';
+    const head = document.createElement('div');
+    head.className = 'preview-head';
+    const name = document.createElement('strong');
+    name.textContent = file.name || transfer.name || 'پیش‌نمایش تصویر';
+    const close = document.createElement('button');
+    close.className = 'secondary';
+    close.textContent = 'بستن';
+    close.onclick = () => backdrop.remove();
+    const img = document.createElement('img');
+    img.alt = name.textContent;
+    img.src = '/api/admin/transfers/' + encodeURIComponent(transferId) +
+      '/preview?ticket=' + encodeURIComponent(ticket.ticket);
+    img.onerror = () => { img.alt = 'نمایش تصویر ممکن نیست؛ ممکن است قالب تصویر پشتیبانی نشود.'; };
+    head.append(name, close);
+    panel.append(head, img);
+    backdrop.append(panel);
+    backdrop.addEventListener('click', event => { if (event.target === backdrop) backdrop.remove(); });
+    document.body.append(backdrop);
+  } catch (e) {
+    alert('پیش‌نمایش انجام نشد: ' + e.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+    await loadTransfers();
+  }
+}
+
 function renderFiles(id, el, j) {
   if (!el || !el.isConnected) return;
   fileListCache.set(id, j);
@@ -417,7 +479,15 @@ function renderFiles(id, el, j) {
         await loadTransfers();
       } catch (e) { alert('خطا: ' + e.message); }
     };
-    actions.append(btn); row.append(label, actions); container.append(row);
+    actions.append(btn);
+    if (/\\.(jpe?g|png|gif|webp|bmp)$/i.test(name)) {
+      const preview = document.createElement('button');
+      preview.className = 'secondary';
+      preview.textContent = 'پیش‌نمایش';
+      preview.onclick = () => previewPhoneImage(id, f, preview);
+      actions.append(preview);
+    }
+    row.append(label, actions); container.append(row);
   }
 
   // ساخت تدریجی درخت: زیرپوشه‌ها فقط هنگام باز شدن ساخته می‌شوند

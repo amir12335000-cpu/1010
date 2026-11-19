@@ -341,6 +341,53 @@ app.get('/api/admin/transfers/:id/download', (req, res) => {
   }
 });
 
+// Short-lived, one-time ticket for viewing an image inline in the dashboard.
+const previewTickets = new Map();
+const previewMimeTypes = {
+  '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp'
+};
+
+app.post('/api/admin/transfers/:id/preview-ticket', admin, (req, res) => {
+  try {
+    const transfer = transfers.get(req.params.id);
+    if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
+      return res.status(404).json({ error: 'not_ready' });
+    }
+    const ext = path.extname(transfer.name || transfer.savedPath).toLowerCase();
+    if (!previewMimeTypes[ext]) return res.status(415).json({ error: 'unsupported_image_type' });
+    const ticket = crypto.randomBytes(24).toString('hex');
+    previewTickets.set(ticket, { transferId: transfer.id, expiresAt: Date.now() + 60_000 });
+    res.json({ ticket });
+  } catch (e) {
+    res.status(500).json({ error: 'preview_ticket_failed' });
+  }
+});
+
+app.get('/api/admin/transfers/:id/preview', (req, res) => {
+  try {
+    const ticket = String(req.query.ticket || '');
+    const ticketData = previewTickets.get(ticket);
+    if (!ticketData || ticketData.transferId !== req.params.id || ticketData.expiresAt < Date.now()) {
+      return res.status(401).json({ error: 'invalid_or_expired_preview_ticket' });
+    }
+    previewTickets.delete(ticket);
+    const transfer = transfers.get(req.params.id);
+    if (!transfer || transfer.status !== 'complete' || !transfer.savedPath || !fs.existsSync(transfer.savedPath)) {
+      return res.status(404).json({ error: 'not_ready' });
+    }
+    const ext = path.extname(transfer.name || transfer.savedPath).toLowerCase();
+    const mime = previewMimeTypes[ext];
+    if (!mime) return res.status(415).json({ error: 'unsupported_image_type' });
+    res.setHeader('Content-Type', mime);
+    res.setHeader('Content-Disposition', 'inline; filename="preview' + ext + '"');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.sendFile(path.resolve(transfer.savedPath));
+  } catch (e) {
+    res.status(500).json({ error: 'preview_failed' });
+  }
+});
+
 // ثبت‌نام دستگاه
 app.post('/api/phone/enroll', (req, res) => {
   try {
