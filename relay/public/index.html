@@ -91,6 +91,7 @@ let devicesLoading = false;
 let transfersLoading = false;
 let lastDeviceRefresh = 0;
 const openFolderPathsByDevice = new Map();
+const fileViewOptions = new Map();
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -308,27 +309,47 @@ function renderFiles(id, el, j) {
     const pathValue = String(f?.path ?? f?.[' path'] ?? '').replace(/\\/g, '/').trim().replace(/\s*\/\s*/g, '/').replace(/\/{2,}/g, '/');
     return { ...f, path: pathValue, name: String(f?.name ?? f?.[' name'] ?? '').trim() };
   }).filter(f => f.path);
+  const allFolders = (Array.isArray(j.folders) ? j.folders : []).map(f => {
+    const pathValue = String(f?.path ?? '').replace(/\\/g, '/').trim().replace(/\s*\/\s*/g, '/').replace(/\/{2,}/g, '/');
+    return { ...f, path: pathValue, name: String(f?.name ?? '').trim() };
+  }).filter(f => f.path);
   const base = '/storage/emulated/0/';
-  const excludedRootFolders = new Set([
-    'Android', 'Alarms', 'Audiobooks', 'Music', 'Notifications',
-    'Pictures', 'Podcasts', 'Ringtones'
-  ]);
-  const preferredFolders = new Set(['Download', 'DCIM', 'Movies', 'Documents']);
-  const visibleFiles = allFiles.filter(f => {
-    const raw = String(f.path || '').replace(/\\/g, '/');
-    if (!raw.startsWith(base)) return false;
-    const relative = raw.slice(base.length).split('/').filter(Boolean);
-    if (relative.length < 2) return false; // فایل‌های ریشه نمایش داده نشوند
-    const root = relative[0];
-    return preferredFolders.has(root);
+  const allVisibleFiles = allFiles.filter(f => String(f.path).replace(/\\/g, '/').startsWith(base));
+  const visibleFolders = allFolders.filter(f => String(f.path).replace(/\\/g, '/').startsWith(base));
+  const view = fileViewOptions.get(id) || { query: '', category: 'all', sort: 'name' };
+  const categoryOf = name => {
+    const ext = String(name).split('.').pop().toLowerCase();
+    if (/^(jpg|jpeg|png|gif|webp|bmp|heic|svg)$/.test(ext)) return 'image';
+    if (/^(mp4|mkv|avi|mov|webm|3gp|m4v)$/.test(ext)) return 'video';
+    if (/^(mp3|wav|m4a|aac|ogg|flac|opus)$/.test(ext)) return 'audio';
+    if (/^(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|rtf|odt|ods)$/.test(ext)) return 'document';
+    if (/^(zip|rar|7z|tar|gz|bz2)$/.test(ext)) return 'archive';
+    return 'other';
+  };
+  let visibleFiles = allVisibleFiles.filter(f => {
+    const matchesQuery = !view.query || (f.name + ' ' + f.path).toLocaleLowerCase().includes(view.query.toLocaleLowerCase());
+    return matchesQuery && (view.category === 'all' || categoryOf(f.name) === view.category);
   });
+  visibleFiles.sort((a, b) => view.sort === 'size' ? Number(b.size || 0) - Number(a.size || 0) : view.sort === 'date' ? Number(b.modified || 0) - Number(a.modified || 0) : a.name.localeCompare(b.name, 'fa'));
 
   const toolbar = document.createElement('div'); toolbar.className = 'files-toolbar';
   const count = document.createElement('span'); count.className = 'file-count';
-  count.textContent = `${visibleFiles.length} فایل در پوشه‌های مجاز | آخرین اسکن: ${fmt(j.updatedAt)}`;
+  count.textContent = `${visibleFiles.length.toLocaleString('fa-IR')} فایل و ${visibleFolders.length.toLocaleString('fa-IR')} پوشه | آخرین اسکن: ${fmt(j.updatedAt)}`;
   const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
   close.onclick = () => { openFileDevices.delete(id); fileListCache.delete(id); wrap.remove(); };
   toolbar.append(count, close); wrap.append(toolbar);
+  const filterBar = document.createElement('div'); filterBar.className = 'files-toolbar';
+  const searchInput = document.createElement('input'); searchInput.type = 'search'; searchInput.placeholder = 'جست‌وجوی نام یا مسیر فایل'; searchInput.value = view.query; searchInput.style.flex = '1'; searchInput.style.minWidth = '180px';
+  const categorySelect = document.createElement('select');
+  [['all','همه فایل‌ها'],['image','تصاویر'],['video','ویدئوها'],['document','اسناد'],['audio','صوتی'],['archive','فشرده'],['other','سایر فایل‌ها']].forEach(([value,label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; categorySelect.append(option); });
+  categorySelect.value = view.category;
+  const sortSelect = document.createElement('select');
+  [['name','مرتب‌سازی: نام'],['date','جدیدترین'],['size','بزرگ‌ترین']].forEach(([value,label]) => { const option = document.createElement('option'); option.value = value; option.textContent = label; sortSelect.append(option); });
+  sortSelect.value = view.sort;
+  const applyView = () => { fileViewOptions.set(id, { query: searchInput.value, category: categorySelect.value, sort: sortSelect.value }); renderFiles(id, el, j); };
+  searchInput.addEventListener('input', () => { clearTimeout(searchInput._refresh); searchInput._refresh = setTimeout(applyView, 250); });
+  categorySelect.onchange = applyView; sortSelect.onchange = applyView;
+  filterBar.append(searchInput, categorySelect, sortSelect); wrap.append(filterBar);
   const selected = selectedFilePaths.get(id) || new Set();
   selectedFilePaths.set(id, selected);
   const batchBar = document.createElement('div'); batchBar.className = 'batch-actions';
@@ -349,29 +370,34 @@ function renderFiles(id, el, j) {
   };
   batchBar.append(selectAll, batchBtn, selectedCount); wrap.append(batchBar); updateBatchBar();
 
-  if (!visibleFiles.length) {
+  if (!visibleFiles.length && !visibleFolders.length) {
     const empty = document.createElement('div'); empty.className = 'muted';
-    empty.textContent = 'در پوشه‌های Download، DCIM، Movies، Documents یا پوشه‌های شخصی فایل قابل نمایشی پیدا نشد.';
+    empty.textContent = 'فایل یا پوشه قابل‌دسترسی در حافظه اشتراکی گوشی پیدا نشد.';
     wrap.append(empty); return;
   }
 
-  // ساخت درخت پوشه‌ها از مسیر واقعی فایل‌های گوشی
+  // Build a complete folder tree, including empty folders, then add files at their actual paths.
   const tree = new Map();
+  function ensureFolder(parts) {
+    let node = tree;
+    for (const part of parts) {
+      if (!node.has(part) || !(node.get(part) instanceof Map)) node.set(part, new Map());
+      node = node.get(part);
+    }
+    return node;
+  }
+  for (const folder of visibleFolders) {
+    const relative = String(folder.path).replace(/\\/g, '/').slice(base.length);
+    const parts = relative.split('/').filter(Boolean);
+    if (parts.length) ensureFolder(parts);
+  }
   for (const f of visibleFiles) {
     const relative = String(f.path).replace(/\\/g, '/').slice(base.length);
     const parts = relative.split('/').filter(Boolean);
-    let node = tree;
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (i === parts.length - 1) {
-        if (!node.has(part)) node.set(part, { __file: f });
-      } else {
-        if (!node.has(part) || node.get(part).__file) node.set(part, new Map());
-        const child = node.get(part);
-        if (!(child instanceof Map)) break;
-        node = child;
-      }
-    }
+    if (!parts.length) continue;
+    const name = parts.pop();
+    const parent = ensureFolder(parts);
+    parent.set(name, { __file: f });
   }
 
   function makeFileRow(container, name, f) {
