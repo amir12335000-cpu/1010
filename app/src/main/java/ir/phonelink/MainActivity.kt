@@ -1,6 +1,7 @@
 package ir.phonelink
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -66,7 +67,7 @@ class MainActivity : Activity() {
             render()
         } else if (waitingForBackgroundPermission) {
             waitingForBackgroundPermission = false
-            startSharingIfNeeded()
+            continueBackgroundSetup()
         }
     }
 
@@ -98,7 +99,50 @@ class MainActivity : Activity() {
                 }
             }
         }
-        startSharingIfNeeded()
+        continueBackgroundSetup()
+    }
+
+    /** Complete the one-time background setup without changing server or transfer behavior. */
+    private fun continueBackgroundSetup() {
+        if (isXiaomiFamily() && !prefs.getBoolean("vendor_autostart_prompted", false)) {
+            prefs.edit().putBoolean("vendor_autostart_prompted", true).apply()
+            AlertDialog.Builder(this)
+                .setTitle("اجازه اجرای خودکار")
+                .setMessage("برای اینکه انتقال اسناد بعد از بستن صفحه برنامه هم در گوشی‌های شیائومی، ردمی و پوکو ادامه پیدا کند، بهتر است اجازه «شروع خودکار» را یک‌بار فعال کنید. این اجازه فقط از تنظیمات خود گوشی قابل فعال‌سازی است.")
+                .setPositiveButton("تنظیم اجرای خودکار") { _, _ ->
+                    openVendorAutostartSettings()
+                    startSharingIfNeeded()
+                }
+                .setNegativeButton("بعداً") { _, _ -> startSharingIfNeeded() }
+                .setOnCancelListener { startSharingIfNeeded() }
+                .show()
+        } else {
+            startSharingIfNeeded()
+        }
+    }
+
+    private fun isXiaomiFamily(): Boolean {
+        val manufacturer = Build.MANUFACTURER.orEmpty().lowercase()
+        val brand = Build.BRAND.orEmpty().lowercase()
+        return manufacturer.contains("xiaomi") || manufacturer.contains("redmi") || manufacturer.contains("poco") ||
+            brand.contains("xiaomi") || brand.contains("redmi") || brand.contains("poco")
+    }
+
+    private fun openVendorAutostartSettings() {
+        val candidates = listOf(
+            Intent("miui.intent.action.OP_AUTO_START").setPackage("com.miui.securitycenter"),
+            Intent().setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+        )
+        for (intent in candidates) {
+            try {
+                startActivity(intent)
+                return
+            } catch (_: Exception) { }
+        }
+        // Safe fallback on Android versions where the vendor-specific screen is unavailable.
+        try {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        } catch (_: Exception) { }
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {

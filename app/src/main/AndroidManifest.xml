@@ -20,6 +20,6 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <service android:name=".ShareService" android:exported="false" android:foregroundServiceType="dataSync" android:stopWithTask="false" android:process=":transfer" />
+        <service android:name=".ShareService" android:exported="false" android:foregroundServiceType="dataSync" android:stopWithTask="false" />
     </application>
 </manifest>
