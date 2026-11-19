@@ -35,6 +35,11 @@
     .file-path{direction:ltr;text-align:left;overflow-wrap:anywhere;font-size:12px;color:#42536a}
     .file-actions{display:flex;gap:6px;flex-wrap:wrap}
     .file-count{font-size:12px;color:#60728a}
+
+    .phone-folder{border-top:1px solid #e5eaf1;padding:8px 4px}
+    .phone-folder>summary{cursor:pointer;font-weight:700;color:#263b55;list-style:none}
+    .phone-folder>summary::-webkit-details-marker{display:none}
+    .phone-folder-contents{padding-right:18px;margin-top:6px;border-right:2px solid #dce5ef}
   </style>
 </head>
 <body>
@@ -282,31 +287,93 @@ function renderFiles(id, el, j) {
   let wrap = el.querySelector('.files-wrap');
   if (!wrap) { wrap = document.createElement('div'); wrap.className = 'files-wrap'; el.append(wrap); }
   wrap.replaceChildren();
+
+  const allFiles = Array.isArray(j.files) ? j.files : [];
+  const base = '/storage/emulated/0/';
+  const excludedRootFolders = new Set([
+    'Android', 'Alarms', 'Audiobooks', 'Music', 'Notifications',
+    'Pictures', 'Podcasts', 'Ringtones'
+  ]);
+  const preferredFolders = new Set(['Download', 'DCIM', 'Movies', 'Documents']);
+  const visibleFiles = allFiles.filter(f => {
+    const raw = String(f.path || '').replace(/\\/g, '/');
+    if (!raw.startsWith(base)) return false;
+    const relative = raw.slice(base.length).split('/').filter(Boolean);
+    if (relative.length < 2) return false; // فایل‌های ریشه نمایش داده نشوند
+    const root = relative[0];
+    return preferredFolders.has(root) || !excludedRootFolders.has(root);
+  });
+
   const toolbar = document.createElement('div'); toolbar.className = 'files-toolbar';
   const count = document.createElement('span'); count.className = 'file-count';
-  count.textContent = `${(j.files || []).length} فایل | آخرین اسکن: ${fmt(j.updatedAt)}`;
+  count.textContent = `${visibleFiles.length} فایل در پوشه‌های مجاز | آخرین اسکن: ${fmt(j.updatedAt)}`;
   const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
   close.onclick = () => { openFileDevices.delete(id); fileListCache.delete(id); wrap.remove(); };
   toolbar.append(count, close); wrap.append(toolbar);
-  if (!Array.isArray(j.files) || !j.files.length) {
+
+  if (!visibleFiles.length) {
     const empty = document.createElement('div'); empty.className = 'muted';
-    empty.textContent = 'فایلی پیدا نشد یا هنوز فهرست از گوشی دریافت نشده است.'; wrap.append(empty); return;
+    empty.textContent = 'در پوشه‌های Download، DCIM، Movies، Documents یا پوشه‌های شخصی فایل قابل نمایشی پیدا نشد.';
+    wrap.append(empty); return;
   }
-  for (const f of j.files) {
-    const row = document.createElement('div'); row.className = 'file';
-    const label = document.createElement('div'); label.className = 'file-path';
-    label.textContent = `${f.name || f.path || 'فایل'} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
-    const actions = document.createElement('div'); actions.className = 'file-actions';
-    const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
-    btn.onclick = async () => {
-      try {
-        await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', { method: 'POST', body: JSON.stringify({ path: f.path }) });
-        alert('درخواست دریافت فایل به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها قابل دانلود است.');
-        await loadTransfers();
-      } catch (e) { alert('خطا: ' + e.message); }
-    };
-    actions.append(btn); row.append(label, actions); wrap.append(row);
+
+  // ساخت درخت پوشه‌ها از مسیر واقعی فایل‌های گوشی
+  const tree = new Map();
+  for (const f of visibleFiles) {
+    const relative = String(f.path).replace(/\\/g, '/').slice(base.length);
+    const parts = relative.split('/').filter(Boolean);
+    let node = tree;
+    for (let i = 0; i < parts.length; i++) {
+      const part = parts[i];
+      if (i === parts.length - 1) {
+        if (!node.has(part)) node.set(part, { __file: f });
+      } else {
+        if (!node.has(part) || node.get(part).__file) node.set(part, new Map());
+        const child = node.get(part);
+        if (!(child instanceof Map)) break;
+        node = child;
+      }
+    }
   }
+
+  function renderTree(container, nodes, depth = 0) {
+    const entries = [...nodes.entries()].sort((a, b) => {
+      const aFolder = a[1] instanceof Map, bFolder = b[1] instanceof Map;
+      if (aFolder !== bFolder) return aFolder ? -1 : 1;
+      return a[0].localeCompare(b[0], 'fa');
+    });
+    for (const [name, value] of entries) {
+      if (value instanceof Map) {
+        const details = document.createElement('details');
+        details.className = 'phone-folder';
+        details.open = depth === 0;
+        const summary = document.createElement('summary');
+        summary.textContent = '📁 ' + name;
+        details.append(summary);
+        const inner = document.createElement('div');
+        inner.className = 'phone-folder-contents';
+        renderTree(inner, value, depth + 1);
+        details.append(inner);
+        container.append(details);
+      } else if (value && value.__file) {
+        const f = value.__file;
+        const row = document.createElement('div'); row.className = 'file';
+        const label = document.createElement('div'); label.className = 'file-path';
+        label.textContent = `📄 ${name} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
+        const actions = document.createElement('div'); actions.className = 'file-actions';
+        const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
+        btn.onclick = async () => {
+          try {
+            await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers', { method: 'POST', body: JSON.stringify({ path: f.path }) });
+            alert('درخواست دریافت فایل به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها قابل دانلود است.');
+            await loadTransfers();
+          } catch (e) { alert('خطا: ' + e.message); }
+        };
+        actions.append(btn); row.append(label, actions); container.append(row);
+      }
+    }
+  }
+  renderTree(wrap, tree);
 }
 
 async function loadTransfers() {

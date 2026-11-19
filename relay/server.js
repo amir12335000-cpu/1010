@@ -323,7 +323,7 @@ app.post('/api/phone/commands/:id/result', phone, (req, res) => {
     if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
       return res.status(404).json({ error: 'not_found' });
     }
-    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 3000);
+    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 20000);
     req.device.filesUpdatedAt = Date.now();
     command.status = 'complete';
     markDirty();
