@@ -32,6 +32,7 @@
     .time{font-size:12px;color:#78879a}
     .files-wrap{margin-top:12px;padding:12px;background:#f8fafc;border:1px solid #dce4ef;border-radius:10px}
     .files-toolbar{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+    .file-select{display:flex;align-items:center;gap:8px;min-width:0}.file-select input{width:18px;height:18px}.batch-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:8px 0}
     .file-path{direction:ltr;text-align:left;overflow-wrap:anywhere;font-size:12px;color:#42536a}
     .file-actions{display:flex;gap:6px;flex-wrap:wrap}
     .file-count{font-size:12px;color:#60728a}
@@ -84,6 +85,7 @@ let firstLoad = true;
 const openFileDevices = new Set();
 // نگهداری فهرست فایل‌ها بین نوبت‌های تازه‌سازی داشبورد
 const fileListCache = new Map();
+const selectedFilePaths = new Map();
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -310,6 +312,25 @@ function renderFiles(id, el, j) {
   const close = document.createElement('button'); close.className = 'secondary'; close.textContent = 'بستن فهرست';
   close.onclick = () => { openFileDevices.delete(id); fileListCache.delete(id); wrap.remove(); };
   toolbar.append(count, close); wrap.append(toolbar);
+  const selected = selectedFilePaths.get(id) || new Set();
+  selectedFilePaths.set(id, selected);
+  const batchBar = document.createElement('div'); batchBar.className = 'batch-actions';
+  const selectedCount = document.createElement('span'); selectedCount.className = 'muted';
+  const batchBtn = document.createElement('button'); batchBtn.textContent = 'انتقال فایل‌های انتخاب‌شده';
+  const selectAll = document.createElement('button'); selectAll.className = 'secondary'; selectAll.textContent = 'انتخاب همه فایل‌ها';
+  function updateBatchBar() { selectedCount.textContent = `${selected.size} فایل انتخاب شده`; batchBtn.disabled = selected.size === 0; }
+  selectAll.onclick = () => { if (selected.size === visibleFiles.length) selected.clear(); else visibleFiles.forEach(f => selected.add(f.path)); renderFiles(id, el, j); };
+  batchBtn.onclick = async () => {
+    if (!selected.size) return;
+    batchBtn.disabled = true; batchBtn.textContent = 'در حال ثبت انتقال‌ها...';
+    try {
+      const result = await api('/api/admin/devices/' + encodeURIComponent(id) + '/transfers/batch', { method: 'POST', body: JSON.stringify({ paths: [...selected] }) });
+      selected.clear();
+      alert(`${result.count} فایل برای انتقال به گوشی ارسال شد. پس از تکمیل، در بخش انتقال‌ها دانلودشان کن.`);
+      await loadTransfers(); updateBatchBar();
+    } catch (e) { alert('خطا در انتقال گروهی: ' + e.message); batchBtn.disabled = false; batchBtn.textContent = 'انتقال فایل‌های انتخاب‌شده'; }
+  };
+  batchBar.append(selectAll, batchBtn, selectedCount); wrap.append(batchBar); updateBatchBar();
 
   if (!visibleFiles.length) {
     const empty = document.createElement('div'); empty.className = 'muted';
@@ -361,6 +382,10 @@ function renderFiles(id, el, j) {
         const label = document.createElement('div'); label.className = 'file-path';
         label.textContent = `📄 ${name} (${Number(f.size || 0).toLocaleString('fa-IR')} بایت)`;
         const actions = document.createElement('div'); actions.className = 'file-actions';
+        const selector = document.createElement('label'); selector.className = 'file-select';
+        const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = selected.has(f.path);
+        checkbox.onchange = () => { if (checkbox.checked) selected.add(f.path); else selected.delete(f.path); updateBatchBar(); };
+        selector.append(checkbox); actions.append(selector);
         const btn = document.createElement('button'); btn.textContent = 'دریافت فایل';
         btn.onclick = async () => {
           try {
@@ -454,7 +479,7 @@ async function loadTransfers() {
           a.href = u;
           a.download = t.name || 'file.bin';
           a.click();
-          URL.revokeObjectURL(u);
+          setTimeout(() => URL.revokeObjectURL(u), 60000);
         };
         actions.append(b);
       }

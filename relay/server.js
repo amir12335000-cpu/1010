@@ -231,6 +231,33 @@ app.post('/api/admin/devices/:id/transfers', admin, (req, res) => {
   }
 });
 
+app.post('/api/admin/devices/:id/transfers/batch', admin, (req, res) => {
+  try {
+    const device = devices.get(req.params.id);
+    if (!device) return res.status(404).json({ error: 'device_not_found' });
+    const paths = Array.isArray(req.body.paths) ? [...new Set(req.body.paths.map(String))] : [];
+    if (!paths.length || paths.length > 100) return res.status(400).json({ error: 'invalid_batch_size' });
+    const created = [];
+    for (const requestedPath of paths) {
+      const knownFile = (device.files || []).find(file => file.path === requestedPath);
+      if (!knownFile) continue;
+      const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
+      transfers.set(command.id, {
+        id: command.id, deviceId: req.params.id, path: knownFile.path,
+        name: knownFile.name || path.basename(knownFile.path),
+        size: Number(knownFile.size || 0), status: 'queued', createdAt: Date.now()
+      });
+      created.push(command.id);
+    }
+    if (!created.length) return res.status(400).json({ error: 'no_valid_files' });
+    markDirty();
+    res.json({ transferIds: created, count: created.length, status: 'queued' });
+  } catch (e) {
+    console.error('batch transfer error:', e.message);
+    res.status(500).json({ error: 'server_error' });
+  }
+});
+
 app.post('/api/admin/transfers/:id/cancel', admin, (req, res) => {
   try {
     const transfer = transfers.get(req.params.id);

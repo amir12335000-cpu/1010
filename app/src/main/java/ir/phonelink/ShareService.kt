@@ -140,7 +140,7 @@ class ShareService : Service() {
             .header("Authorization", "Bearer $token")
             .post(body).build()
         http.newCall(request).execute().use { response ->
-            updateNotification(if (response.isSuccessful) "دریافت فایل انجام شد: ${file.name}" else "خطا در ارسال فایل: ${response.code}")
+            updateNotification(if (response.isSuccessful) "در حال انتقال اسناد" else "خطا در انتقال اسناد")
         }
     }
 
