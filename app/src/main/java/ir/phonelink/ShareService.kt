@@ -84,9 +84,15 @@ class ShareService : Service() {
                 // Keep the foreground sync service alive; next poll retries.
             }
             // WebSocket wakes this loop immediately; 2.5s polling remains as a reliable fallback.
+            var interrupted = false
             synchronized(wakeLock) {
-                try { wakeLock.wait(2500) } catch (_: InterruptedException) { if (!running.get()) break }
+                try {
+                    wakeLock.wait(2500)
+                } catch (_: InterruptedException) {
+                    interrupted = true
+                }
             }
+            if (interrupted && !running.get()) break
         }
         commandSocket?.close(1000, "service stopped")
         commandSocket = null
