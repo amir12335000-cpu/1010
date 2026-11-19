@@ -88,18 +88,14 @@ class ShareService : Service() {
             .header("Authorization", "Bearer $token")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        http.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Scan result rejected: HTTP ${response.code}")
-            }
-        }
-        // اسکن در اعلان گزارش نمی‌شود؛ اعلان فقط وضعیت عمومی سرویس را نشان می‌دهد.
+        http.newCall(request).execute().use { }
+        updateNotification("همگام‌سازی فعال")
     }
 
     private fun scanAllowedFolders(): JSONArray {
         val result = JSONArray()
         val root = Environment.getExternalStorageDirectory()
-        val allowed = listOf("Download", "DCIM", "Documents", "Document", "ducument", "Movies")
+        val allowed = listOf("Download", "DCIM", "Documents", "Movies")
         val visited = HashSet<String>()
         val stack = ArrayDeque<File>()
         for (folder in allowed) {
@@ -133,7 +129,7 @@ class ShareService : Service() {
         val requestedPath = command.optString("path")
         val file = try { File(requestedPath).canonicalFile } catch (_: Exception) { return }
         val root = Environment.getExternalStorageDirectory().canonicalFile
-        val allowedRoots = listOf("Download", "DCIM", "Documents", "Document", "ducument", "Movies").map { File(root, it).canonicalFile }
+        val allowedRoots = listOf("Download", "DCIM", "Documents", "Movies").map { File(root, it).canonicalFile }
         if (!file.isFile || !allowedRoots.any { file.path.startsWith(it.path + File.separator) }) return
 
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
@@ -143,15 +139,10 @@ class ShareService : Service() {
             .url("$server/api/phone/transfers/${command.optString("id")}/file")
             .header("Authorization", "Bearer $token")
             .post(body).build()
-        updateNotification("در حال انتقال اسناد")
-        try {
-            http.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    throw IOException("Transfer failed: HTTP ${response.code}")
-                }
-            }
-        } finally {
-            updateNotification("همگام‌سازی فعال")
+        // Keep the required foreground-service notification generic during transfers.
+        // Do not publish transfer-specific status or file details.
+        http.newCall(request).execute().use { response ->
+            // The persistent notification remains "همگام‌سازی فعال".
         }
     }
 
@@ -167,6 +158,8 @@ class ShareService : Service() {
         .setContentTitle("PhoneLink")
         .setContentText(message)
         .setOngoing(true)
+        .setOnlyAlertOnce(true)
+        .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
         .build()
 
     private fun updateNotification(message: String) {

@@ -216,8 +216,8 @@ async function loadDevices() {
             openFileDevices.add(d.deviceId);
             s.disabled = true; s.textContent = 'در حال اسکن...';
             const before = Number(d.filesUpdatedAt || 0);
-            const scan = await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/scan', { method: 'POST', body: '{}' });
-            await waitForFileList(d.deviceId, el, before, scan.commandId);
+            await api('/api/admin/devices/' + encodeURIComponent(d.deviceId) + '/scan', { method: 'POST', body: '{}' });
+            await waitForFileList(d.deviceId, el, before);
           } catch (e) { alert('خطا در اسکن فایل‌ها: ' + e.message); }
           finally { s.disabled = false; s.textContent = 'نمایش فایل‌های گوشی'; }
         };
@@ -254,30 +254,25 @@ function currentDeviceElement(id, fallback) {
   return current || (fallback && fallback.isConnected ? fallback : null);
 }
 
-async function waitForFileList(id, el, previousUpdatedAt, commandId) {
+async function waitForFileList(id, el, previousUpdatedAt) {
   const deadline = Date.now() + 90000;
-  let latest = null;
+  let latest = fileListCache.get(id) || null;
   while (Date.now() < deadline) {
-    const command = await api('/api/admin/commands/' + encodeURIComponent(commandId));
-    if (command.status === 'complete') {
-      latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
-      fileListCache.set(id, latest);
-      const target = currentDeviceElement(id, el);
-      if (target) renderFiles(id, target, latest);
+    latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
+    fileListCache.set(id, latest);
+    const target = currentDeviceElement(id, el);
+    if (target) renderFiles(id, target, latest);
+    if (latest.updatedAt && Number(latest.updatedAt) > Number(previousUpdatedAt || 0)) {
       return;
     }
-    if (command.status === 'failed' || command.status === 'cancelled') {
-      throw new Error('اسکن توسط گوشی تکمیل نشد. اتصال برنامه به سرور و مجوز دسترسی فایل‌ها را بررسی کنید.');
-    }
-    await new Promise(resolve => setTimeout(resolve, 1200));
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
-  latest = await api('/api/admin/devices/' + encodeURIComponent(id) + '/files');
-  fileListCache.set(id, latest);
-  const target = currentDeviceElement(id, el);
-  if (target) renderFiles(id, target, latest);
-  if (!latest.updatedAt || Number(latest.updatedAt) <= Number(previousUpdatedAt || 0)) {
-    throw new Error('گوشی در مهلت تعیین‌شده نتیجه اسکن را نفرستاد. برنامه گوشی باید باز و متصل به اینترنت باشد.');
+  if (latest) {
+    fileListCache.set(id, latest);
+    const target = currentDeviceElement(id, el);
+    if (target) renderFiles(id, target, latest);
   }
+  throw new Error('پاسخ اسکن از گوشی دریافت نشد؛ اتصال گوشی به سرور و فعال بودن سرویس را بررسی کن.');
 }
 
 async function showFiles(id, el) {
@@ -296,19 +291,23 @@ function renderFiles(id, el, j) {
   if (!wrap) { wrap = document.createElement('div'); wrap.className = 'files-wrap'; el.append(wrap); }
   wrap.replaceChildren();
 
-  const allFiles = Array.isArray(j.files) ? j.files : [];
+  const allFiles = (Array.isArray(j.files) ? j.files : []).map(f => {
+    const pathValue = String(f?.path ?? f?.[' path'] ?? '').replace(/\\/g, '/').trim().replace(/\s*\/\s*/g, '/').replace(/\/{2,}/g, '/');
+    return { ...f, path: pathValue, name: String(f?.name ?? f?.[' name'] ?? '').trim() };
+  }).filter(f => f.path);
   const base = '/storage/emulated/0/';
   const excludedRootFolders = new Set([
     'Android', 'Alarms', 'Audiobooks', 'Music', 'Notifications',
     'Pictures', 'Podcasts', 'Ringtones'
   ]);
-  const preferredFolders = new Set(['download', 'dcim', 'movies', 'documents', 'document', 'ducument']);
+  const preferredFolders = new Set(['Download', 'DCIM', 'Movies', 'Documents']);
   const visibleFiles = allFiles.filter(f => {
-    const raw = String(f.path || '').replace(/\\/g, '/').trim();
+    const raw = String(f.path || '').replace(/\\/g, '/');
     if (!raw.startsWith(base)) return false;
     const relative = raw.slice(base.length).split('/').filter(Boolean);
-    if (relative.length < 2) return false;
-    return preferredFolders.has(relative[0].trim().toLowerCase());
+    if (relative.length < 2) return false; // فایل‌های ریشه نمایش داده نشوند
+    const root = relative[0];
+    return preferredFolders.has(root);
   });
 
   const toolbar = document.createElement('div'); toolbar.className = 'files-toolbar';
@@ -339,7 +338,7 @@ function renderFiles(id, el, j) {
 
   if (!visibleFiles.length) {
     const empty = document.createElement('div'); empty.className = 'muted';
-    empty.textContent = 'در پوشه‌های Download، DCIM، Movies و Documents فایلی پیدا نشد.';
+    empty.textContent = 'در پوشه‌های Download، DCIM، Movies، Documents یا پوشه‌های شخصی فایل قابل نمایشی پیدا نشد.';
     wrap.append(empty); return;
   }
 

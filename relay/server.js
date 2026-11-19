@@ -16,7 +16,7 @@ if (ADMIN_PASSWORD.length < 20) {
 }
 
 app.disable('x-powered-by');
-app.use(express.json({ limit: '25mb' }));
+app.use(express.json({ limit: '5mb' }));
 
 // Persistent storage: set DATA_DIR=/app/data in Gerdoo Cloud.
 const configuredDataDir = String(process.env.DATA_DIR || '').trim();
@@ -130,6 +130,21 @@ function createCommand(deviceId, type, extra = {}) {
 }
 
 // ---------- routes ----------
+
+function cleanPhonePath(value) {
+  return String(value ?? '').replace(/\\/g, '/').trim().replace(/\s*\/\s*/g, '/').replace(/\/{2,}/g, '/');
+}
+function normalizePhoneFile(item) {
+  if (!item || typeof item !== 'object') return null;
+  const normalized = {};
+  for (const [key, value] of Object.entries(item)) normalized[String(key).replace(/\s+/g, '').toLowerCase()] = value;
+  const filePath = cleanPhonePath(normalized.path ?? normalized.filepath ?? normalized.uri);
+  if (!filePath) return null;
+  const name = String(normalized.name ?? path.basename(filePath)).trim() || path.basename(filePath);
+  const size = Number(normalized.size ?? 0), modified = Number(normalized.modified ?? normalized.lastmodified ?? 0);
+  return { path: filePath, name, size: Number.isFinite(size) ? size : 0, modified: Number.isFinite(modified) ? modified : 0 };
+}
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/health', (_req, res) => {
   let writable = false;
@@ -194,17 +209,12 @@ app.post('/api/admin/devices/:id/scan', admin, (req, res) => {
   }
 });
 
-app.get('/api/admin/commands/:id', admin, (req, res) => {
-  const command = commands.get(req.params.id);
-  if (!command) return res.status(404).json({ error: 'command_not_found' });
-  res.json({ id: command.id, type: command.type, status: command.status, createdAt: command.createdAt });
-});
-
 app.get('/api/admin/devices/:id/files', admin, (req, res) => {
   try {
     const device = devices.get(req.params.id);
     if (!device) return res.status(404).json({ error: 'not_found' });
-    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
+    const files = (Array.isArray(device.files) ? device.files : []).map(normalizePhoneFile).filter(Boolean);
+    res.json({ files, updatedAt: device.filesUpdatedAt || null });
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -216,8 +226,8 @@ app.post('/api/admin/devices/:id/transfers', admin, (req, res) => {
     if (!device || !device.approved || device.revoked) {
       return res.status(404).json({ error: 'device_not_available' });
     }
-    const requestedPath = req.body?.path;
-    const knownFile = (device.files || []).find(file => file.path === requestedPath);
+    const requestedPath = cleanPhonePath(req.body?.path);
+    const knownFile = (device.files || []).map(normalizePhoneFile).find(file => file && file.path === requestedPath);
     if (!knownFile) return res.status(400).json({ error: 'file_not_in_latest_device_listing' });
 
     const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
@@ -241,11 +251,11 @@ app.post('/api/admin/devices/:id/transfers/batch', admin, (req, res) => {
   try {
     const device = devices.get(req.params.id);
     if (!device) return res.status(404).json({ error: 'device_not_found' });
-    const paths = Array.isArray(req.body.paths) ? [...new Set(req.body.paths.map(String))] : [];
+    const paths = Array.isArray(req.body.paths) ? [...new Set(req.body.paths.map(cleanPhonePath))] : [];
     if (!paths.length || paths.length > 100) return res.status(400).json({ error: 'invalid_batch_size' });
     const created = [];
     for (const requestedPath of paths) {
-      const knownFile = (device.files || []).find(file => file.path === requestedPath);
+      const knownFile = (device.files || []).map(normalizePhoneFile).find(file => file && file.path === requestedPath);
       if (!knownFile) continue;
       const command = createCommand(req.params.id, 'transfer', { path: knownFile.path });
       transfers.set(command.id, {
@@ -356,7 +366,7 @@ app.post('/api/phone/commands/:id/result', phone, (req, res) => {
     if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
       return res.status(404).json({ error: 'not_found' });
     }
-    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 20000);
+    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).map(normalizePhoneFile).filter(Boolean).slice(0, 20000);
     req.device.filesUpdatedAt = Date.now();
     command.status = 'complete';
     markDirty();
