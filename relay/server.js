@@ -194,11 +194,17 @@ app.post('/api/admin/devices/:id/scan', admin, (req, res) => {
   }
 });
 
+app.get('/api/admin/commands/:id', admin, (req, res) => {
+  const command = commands.get(req.params.id);
+  if (!command) return res.status(404).json({ error: 'command_not_found' });
+  res.json({ id: command.id, type: command.type, status: command.status, createdAt: command.createdAt });
+});
+
 app.get('/api/admin/devices/:id/files', admin, (req, res) => {
   try {
     const device = devices.get(req.params.id);
     if (!device) return res.status(404).json({ error: 'not_found' });
-    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null, folderStats: device.folderStats || {} });
+    res.json({ files: device.files || [], updatedAt: device.filesUpdatedAt || null });
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
   }
@@ -350,12 +356,7 @@ app.post('/api/phone/commands/:id/result', phone, (req, res) => {
     if (!command || command.deviceId !== req.device.deviceId || command.type !== 'list' || command.status === 'cancelled') {
       return res.status(404).json({ error: 'not_found' });
     }
-    if (!Array.isArray(req.body.files)) {
-      return res.status(400).json({ error: 'invalid_file_list' });
-    }
-    req.device.files = req.body.files.slice(0, 20000);
-    req.device.folderStats = (req.body.folderStats && typeof req.body.folderStats === 'object')
-      ? req.body.folderStats : {};
+    req.device.files = (Array.isArray(req.body.files) ? req.body.files : []).slice(0, 20000);
     req.device.filesUpdatedAt = Date.now();
     command.status = 'complete';
     markDirty();
