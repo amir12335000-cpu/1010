@@ -1,14 +1,24 @@
 package ir.phonelink
 
-import android.app.*
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Intent
-import android.os.*
+import android.os.Build
 import android.os.Environment
+import android.os.Handler
+import android.os.IBinder
+import android.os.Looper
 import androidx.core.app.NotificationCompat
-import okhttp3.*
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -38,7 +48,7 @@ class ShareService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?) = null
+    override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -87,6 +97,9 @@ class ShareService : Service() {
         }
     }
 
-    private fun base() = (prefs.getString("server_url", "") ?: "").trimEnd('/')
+    private fun base(): String {
+        return (prefs.getString("server_url", "") ?: "").trimEnd('/')
+    }
 
-    private fun 
+    private fun auth(url: String, body: JSONObject? = null): Request {
+        val builder = 
