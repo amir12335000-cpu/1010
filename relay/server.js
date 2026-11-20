@@ -46,6 +46,7 @@ function safeEqual(a, b) {
 // ---------- مدیریت حافظه و ذخیره ----------
 let saveTimer = null;
 let dirty = false;
+let stateLoaded = false;
 
 function markDirty() {
   dirty = true;
@@ -60,6 +61,12 @@ function markDirty() {
 }
 
 function saveStateNow() {
+  // Never replace a missing/corrupt previous state with an empty state.
+  // A first-time enrollment is allowed to create the initial state.
+  if (!stateLoaded && devices.size === 0) {
+    console.warn('[storage] save skipped: no state was loaded and no devices are registered yet');
+    return;
+  }
   try {
     // فقط داده‌های لازم را نگه می‌داریم
     const state = {
@@ -76,15 +83,19 @@ function saveStateNow() {
 }
 
 function loadState() {
-  if (!fs.existsSync(stateFile)) return;
+  if (!fs.existsSync(stateFile)) {
+    console.error(`[storage] state file not found: ${stateFile}; previous devices cannot be restored from this volume`);
+    return;
+  }
   try {
     const s = JSON.parse(fs.readFileSync(stateFile, 'utf8'));
-    for (const d of s.devices || []) devices.set(d.deviceId, d);
-    for (const c of s.commands || []) commands.set(c.id, c);
-    for (const t of s.transfers || []) transfers.set(t.id, t);
+    for (const d of s.devices || []) if (d && d.deviceId) devices.set(d.deviceId, d);
+    for (const c of s.commands || []) if (c && c.id) commands.set(c.id, c);
+    for (const t of s.transfers || []) if (t && t.id) transfers.set(t.id, t);
+    stateLoaded = true;
     console.log(`Loaded ${devices.size} devices, ${commands.size} commands, ${transfers.size} transfers`);
   } catch (e) {
-    console.error('Could not load state:', e.message);
+    console.error('[storage] Could not load state; original file was left untouched:', e.message);
   }
 }
 loadState();
@@ -109,6 +120,45 @@ setInterval(() => {
   markDirty();
   console.log(`Memory cleanup: devices=${devices.size}, commands=${commands.size}, transfers=${transfers.size}`);
 }, 10 * 60 * 1000);
+
+// Retry commands that were fetched by the phone but never produced a result.
+// A five-minute lease avoids quickly duplicating slow scans or large uploads.
+setInterval(() => {
+  const now = Date.now();
+  let changed = false;
+  for (const command of commands.values()) {
+    if (command.status !== 'delivered') continue;
+    if (!command.deliveredAt || now - command.deliveredAt < 5 * 60 * 1000) continue;
+
+    const attempts = Number(command.attempts || 1);
+    if (attempts >= 3) {
+      command.status = 'failed';
+      command.failedAt = now;
+      command.error = command.error || 'phone_did_not_complete_command_after_3_attempts';
+      const transfer = transfers.get(command.id);
+      if (transfer && !['complete', 'cancelled'].includes(transfer.status)) {
+        transfer.status = 'failed';
+        transfer.error = command.error;
+        transfer.failedAt = now;
+      }
+      changed = true;
+      console.error(`[command] failed after retries device=${command.deviceId} command=${command.id} type=${command.type}`);
+      continue;
+    }
+
+    command.status = 'pending';
+    command.deliveredAt = null;
+    const transfer = transfers.get(command.id);
+    if (transfer && !['complete', 'cancelled'].includes(transfer.status)) {
+      transfer.status = 'queued';
+      transfer.retryAt = now;
+    }
+    changed = true;
+    console.warn(`[command] retry queued device=${command.deviceId} command=${command.id} attempt=${attempts + 1}`);
+    void sendPushyWake(command.deviceId);
+  }
+  if (changed) markDirty();
+}, 30 * 1000);
 
 // ---------- middleware ----------
 function admin(req, res, next) {
@@ -145,10 +195,12 @@ async function sendPushyWake(deviceId) {
     });
     const result = await response.json().catch(() => ({}));
     if (!response.ok || result.success !== true) {
-      console.error('Pushy wake failed:', response.status, result.code || result.error || 'unknown_error');
+      console.error(`[pushy] wake failed device=${deviceId} http=${response.status} reason=${result.code || result.error || 'unknown_error'}`);
+    } else {
+      console.log(`[pushy] wake accepted device=${deviceId}`);
     }
   } catch (e) {
-    console.error('Pushy wake error:', e.message);
+    console.error(`[pushy] wake error device=${deviceId}:`, e.message);
   }
 }
 
@@ -156,13 +208,18 @@ function createCommand(deviceId, type, extra = {}) {
   const id = crypto.randomBytes(12).toString('hex');
   const command = { id, deviceId, type, ...extra, status: 'pending', createdAt: Date.now() };
   commands.set(id, command);
-  // Prefer the live socket; otherwise wake only the selected device through Pushy.
+  // Notify through WebSocket when available AND send Pushy as a background wake-up.
+  // An open socket in the server does not prove that the Android service is running.
   const socket = phoneSockets.get(deviceId);
   if (socket && socket.readyState === WebSocket.OPEN) {
-    try { socket.send(JSON.stringify({ type: 'command_available', commandId: id })); } catch (_) {}
-  } else {
-    void sendPushyWake(deviceId);
+    try {
+      socket.send(JSON.stringify({ type: 'command_available', commandId: id }));
+      console.log(`[command] websocket notified device=${deviceId} command=${id}`);
+    } catch (e) {
+      console.error(`[command] websocket notify failed device=${deviceId}:`, e.message);
+    }
   }
+  void sendPushyWake(deviceId);
   markDirty();
   return command;
 }
@@ -317,7 +374,7 @@ app.post('/api/admin/transfers/:id/cancel', admin, (req, res) => {
   try {
     const transfer = transfers.get(req.params.id);
     const command = commands.get(req.params.id);
-    if (!transfer || !command || !['queued', 'delivered'].includes(transfer.status)) {
+    if (!transfer || !command || !['queued', 'delivered', 'processing'].includes(transfer.status)) {
       return res.status(409).json({ error: 'transfer_not_cancellable' });
     }
     transfer.status = 'cancelled';
@@ -470,8 +527,29 @@ app.get('/api/phone/commands', phone, (req, res) => {
   try {
     req.device.lastSeen = Date.now();
     const pending = [...commands.values()].filter(c => c.deviceId === req.device.deviceId && c.status === 'pending');
-    for (const command of pending) command.status = 'delivered';
-    if (pending.length) markDirty();
+    const now = Date.now();
+    for (const command of pending) {
+      command.status = 'delivered';
+      command.deliveredAt = now;
+      command.attempts = Number(command.attempts || 0) + 1;
+
+      // Reflect command pickup in the transfer list immediately.
+      // This does not claim the file has uploaded; only the phone has fetched the job.
+      if (command.type === 'transfer') {
+        const transfer = transfers.get(command.id);
+        if (transfer && !['complete', 'cancelled', 'failed'].includes(transfer.status)) {
+          transfer.status = 'processing';
+          transfer.startedAt = transfer.startedAt || now;
+          transfer.lastAttemptAt = now;
+          transfer.attempts = command.attempts;
+          delete transfer.retryAt;
+        }
+      }
+    }
+    if (pending.length) {
+      markDirty();
+      console.log(`[command] delivered device=${req.device.deviceId} count=${pending.length} ids=${pending.map(c => c.id).join(',')}`);
+    }
     res.json(pending);
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
@@ -493,7 +571,9 @@ app.post('/api/phone/commands/:id/result', phone, (req, res) => {
     }).filter(Boolean).slice(0, 50000);
     req.device.filesUpdatedAt = Date.now();
     command.status = 'complete';
+    command.completedAt = Date.now();
     markDirty();
+    console.log(`[scan] completed device=${req.device.deviceId} command=${command.id} files=${req.device.files.length} folders=${req.device.folders.length}`);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: 'server_error' });
@@ -538,10 +618,12 @@ app.post('/api/phone/transfers/:id/file', phone, upload.single('file'), (req, re
     transfer.status = 'complete';
     transfer.completedAt = Date.now();
     command.status = 'complete';
+    command.completedAt = Date.now();
     markDirty();
+    console.log(`[transfer] completed device=${req.device.deviceId} transfer=${transfer.id} name=${transfer.name}`);
     res.json({ ok: true });
   } catch (e) {
-    console.error('transfer file error:', e.message);
+    console.error(`[transfer] upload failed id=${req.params.id} device=${req.device?.deviceId || 'unknown'}:`, e.message);
     if (req.file?.path && fs.existsSync(req.file.path)) {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
@@ -636,4 +718,16 @@ process.on('unhandledRejection', (err) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Alzahra server listening on ${PORT}`);
+  console.log(`[storage] dataDir=${dataDir} stateFile=${stateFile} loaded=${stateLoaded} devices=${devices.size}`);
+
+  // Wake already-enrolled phones after every server restart. The installed app's
+  // PushReceiver handles WAKE and starts its existing foreground sync service.
+  setTimeout(() => {
+    const targets = [...devices.values()].filter(d => d.approved && !d.revoked && d.pushyToken);
+    console.log(`[startup] sending reconnect wake to ${targets.length} saved devices`);
+    for (const device of targets) void sendPushyWake(device.deviceId);
+    if (!stateLoaded && devices.size === 0) {
+      console.error('[startup] no saved device records are available; push wake cannot reach old phones until state.json is restored');
+    }
+  }, 3000);
 });
